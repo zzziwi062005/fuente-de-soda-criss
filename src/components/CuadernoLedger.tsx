@@ -3544,8 +3544,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           const loc = l.clientType === 'mesa' ? ' (Mesa)' : '';
           return `${l.quantity}x ${name}${loc}`;
         }).join(', ');
-        const extrasSummary = c.extras.length > 0 ? ` + ${c.extras.map((e) => `${e.quantity}x ${e.name}`).join(', ')}` : '';
-        msg += `• ${c.dayOfWeek} ${d}: ${lunchSummary}${extrasSummary} -> *${formatCurrency(c.total)}*\n`;
+        const extrasSummary = c.extras.map((e) => `${e.quantity}x ${e.name}`).join(', ');
+        // Solo se une con " + " cuando hay almuerzos y extras (evita "  + 1x Cubana" en pedidos de solo extras)
+        const itemsSummary = [lunchSummary, extrasSummary].filter(Boolean).join(' + ') || 'Consumo';
+        msg += `• ${c.dayOfWeek} ${d}: ${itemsSummary} -> *${formatCurrency(c.total)}*\n`;
       });
     }
 
@@ -3585,7 +3587,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
     const waPhone = formatPhoneForWhatsApp(rawPhone);
     const msg = generateClientWhatsAppStatement({ ...client, phone: rawPhone }, monthOrWeekStr);
-    const url = `https://wa.me/${waPhone}?text=${msg}`;
+    // Enlace directo a api.whatsapp.com: el atajo wa.me redirige y en esa redirección
+    // daña los emojis del texto (aparecen como "�"), sobre todo en WhatsApp de escritorio.
+    const url = `https://api.whatsapp.com/send?phone=${waPhone}&text=${msg}`;
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
