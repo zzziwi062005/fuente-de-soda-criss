@@ -69,12 +69,17 @@ create table if not exists public.consumptions (
   extras          jsonb         not null default '[]'::jsonb check (jsonb_typeof(extras)  = 'array'),  -- OrderExtraItem[]
   total           numeric(10,2) not null default 0,
   payment_status  text          not null default 'pendiente' check (payment_status in ('pagado', 'pendiente')),
-  payment_method  text          check (payment_method in ('efectivo', 'yape')),
+  payment_method  text          check (payment_method in ('efectivo', 'yape', 'abono')),  -- 'abono' = liquidado con abonos previos
   payment_date    date,
   notes           text,
   created_at      timestamptz   not null default now(),
   updated_at      timestamptz   not null default now()
 );
+
+-- Bases creadas con una versión anterior: permitir 'abono' como método de cobro del pedido
+alter table public.consumptions drop constraint if exists consumptions_payment_method_check;
+alter table public.consumptions add constraint consumptions_payment_method_check
+  check (payment_method in ('efectivo', 'yape', 'abono'));
 
 create index if not exists consumptions_date_idx      on public.consumptions (date);
 create index if not exists consumptions_client_id_idx on public.consumptions (client_id);

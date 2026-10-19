@@ -142,6 +142,8 @@ export interface DailyClientAccount {
   totalConsumed: number;
   payments: PaymentRecord[];
   totalPaid: number;
+  /** Abonos de la cuenta que todavía no se aplicaron a ningún pedido (se descuentan del saldo). */
+  openAbono: number;
   saldoPendiente: number;
   isFullyPaid: boolean;
   paymentMethod?: PaymentMethod | 'mixto' | 'abono';
@@ -155,6 +157,9 @@ export const isPaymentDp = (p: PaymentRecord): boolean =>
     p.isDpPayment ||
     (p.notes && (p.notes.includes('DP') || p.notes.toLowerCase().includes('deuda pasada')))
   );
+
+/** Redondeo a céntimos para evitar errores de coma flotante en montos (S/). */
+export const roundMoney = (n: number): number => Math.round(n * 100) / 100;
 
 export const isPaymentDa = (p: PaymentRecord): boolean =>
   Boolean(
@@ -873,38 +878,59 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
       const totalConsumed = sortedCons.reduce((s, c) => s + c.total, 0);
 
-      // Pagos o abonos registrados para este cliente en esta fecha (estrictamente cuenta diaria)
+      const belongsToClient = (clientId: string | undefined, clientName: string) =>
+        (!!clientId && (clientId === group.clientId || (!!clientRec && clientId === clientRec.id))) ||
+        clientName.trim().toLowerCase() === finalName.trim().toLowerCase();
+
+      const pendingCons = sortedCons.filter((c) => c.paymentStatus === 'pendiente');
+
+      // Inicio del periodo de la cuenta: el pedido pendiente más antiguo (o, si ya está todo
+      // pagado, el pedido más antiguo que se muestra). Los abonos registrados desde esa fecha
+      // hasta el día que se está viendo SIGUEN contando aunque se cambie de día; antes solo se
+      // sumaban los abonos del mismo día y al día siguiente "desaparecían" del saldo.
+      const accountStart = (pendingCons.length > 0 ? pendingCons : sortedCons).reduce(
+        (min, c) => (c.date < min ? c.date : min),
+        selectedDate
+      );
+
+      // Pagos o abonos de la cuenta diaria dentro de ese periodo
       const clientPayments = payments.filter(
         (p) =>
           p.accountType === 'diaria' &&
-          (p.clientId === group.clientId ||
-            (clientRec && p.clientId === clientRec.id) ||
-            p.clientName.trim().toLowerCase() === finalName.trim().toLowerCase()) &&
-          p.date === selectedDate &&
+          belongsToClient(p.clientId, p.clientName) &&
+          p.date >= accountStart &&
+          p.date <= selectedDate &&
           !isPaymentDp(p) &&
           !p.isDaPayment
       );
       const totalPaid = clientPayments.reduce((s, p) => s + p.amount, 0);
 
+      // Abonos ya utilizados para liquidar pedidos (pedidos cobrados con método 'abono') en el periodo
+      const consumedByAbono = consumptions
+        .filter(
+          (c) =>
+            c.accountType === 'diaria' &&
+            c.paymentStatus === 'pagado' &&
+            (c.paymentMethod as string) === 'abono' &&
+            !!c.paymentDate &&
+            c.paymentDate >= accountStart &&
+            c.paymentDate <= selectedDate &&
+            belongsToClient(c.clientId, c.clientName)
+        )
+        .reduce((s, c) => s + c.total, 0);
+      const openAbono = roundMoney(Math.max(0, totalPaid - consumedByAbono));
+
       const allMarkedPaid = sortedCons.length > 0 && sortedCons.every((c) => c.paymentStatus === 'pagado');
       let saldoPendiente = 0;
       let isFullyPaid = false;
 
-      const pendingConsTotal = sortedCons
-        .filter((c) => c.paymentStatus === 'pendiente')
-        .reduce((s, c) => s + c.total, 0);
+      const pendingConsTotal = pendingCons.reduce((s, c) => s + c.total, 0);
 
       if (allMarkedPaid) {
         saldoPendiente = 0;
         isFullyPaid = true;
       } else {
-        // Abonos que ya fueron utilizados para liquidar pedidos anteriores
-        const consumedByAbono = sortedCons
-          .filter((c) => c.paymentStatus === 'pagado' && (c.paymentMethod as string) === 'abono')
-          .reduce((s, c) => s + c.total, 0);
-        const unconsumedAbono = Math.max(0, totalPaid - consumedByAbono);
-
-        saldoPendiente = Math.max(0, pendingConsTotal - unconsumedAbono);
+        saldoPendiente = roundMoney(Math.max(0, pendingConsTotal - openAbono));
         isFullyPaid = saldoPendiente === 0 && sortedCons.length > 0;
       }
 
@@ -946,6 +972,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         totalConsumed,
         payments: clientPayments,
         totalPaid,
+        openAbono,
         saldoPendiente,
         isFullyPaid,
         paymentMethod,
@@ -2196,25 +2223,77 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   };
 
   // Cobrar un producto/adicional individual de una cuenta diaria
+  // =========================================================================
+  // COBRO DE CUENTAS DIARIAS CON ABONOS PREVIOS
+  // Si la cuenta tiene abonos sin aplicar, primero se usan esos abonos y solo
+  // el resto entra a la caja del día. Los pedidos liquidados (total o
+  // parcialmente) con abonos quedan con método 'abono' (la caja ya los cuenta
+  // a través de los registros de abono) y el resto se registra como un pago
+  // `pay-saldo-<idPedido>-…` con el método elegido.
+  // =========================================================================
+  const findDailyAccountOf = (consumptionId: string) =>
+    dailyAccountsList.find((a) => a.consumptions.some((c) => c.id === consumptionId));
+
+  const settleDailyConsumptions = (
+    account: DailyClientAccount | undefined,
+    toPay: ConsumptionRecord[],
+    method: PaymentMethod
+  ): { settled: ConsumptionRecord[]; extraPayments: PaymentRecord[] } => {
+    let available = account ? account.openAbono : 0;
+    const stamp = Date.now();
+    const nowIso = new Date().toISOString();
+    const settled: ConsumptionRecord[] = [];
+    const extraPayments: PaymentRecord[] = [];
+
+    [...toPay]
+      .sort((a, b) => a.date.localeCompare(b.date) || a.timestamp.localeCompare(b.timestamp))
+      .forEach((c, idx) => {
+        const applied = roundMoney(Math.min(available, c.total));
+        available = roundMoney(available - applied);
+        const remainder = roundMoney(c.total - applied);
+
+        if (applied > 0 && account) {
+          settled.push({ ...c, paymentStatus: 'pagado', paymentMethod: 'abono', paymentDate: selectedDate });
+          if (remainder > 0) {
+            extraPayments.push({
+              id: `pay-saldo-${c.id}-${stamp}${idx}`,
+              clientId: account.clientId,
+              clientName: account.clientName,
+              piso: account.piso,
+              accountType: 'diaria',
+              date: selectedDate,
+              dayOfWeek: getDayOfWeekName(selectedDate),
+              amount: remainder,
+              method,
+              notes: 'Saldo restante al cobrar la cuenta',
+              timestamp: nowIso,
+            });
+          }
+        } else {
+          settled.push({ ...c, paymentStatus: 'pagado', paymentMethod: method, paymentDate: selectedDate });
+        }
+      });
+
+    return { settled, extraPayments };
+  };
+
+  /** Pagos `pay-saldo-…` generados al cobrar estos pedidos (se borran si se deshace el cobro). */
+  const isSettlementPaymentOf = (p: PaymentRecord, consumptionIds: Set<string>) =>
+    p.id.startsWith('pay-saldo-') &&
+    [...consumptionIds].some((id) => p.id.startsWith(`pay-saldo-${id}-`));
+
   const handlePayAccountItem = (item: DailyAccountProductItem, method: PaymentMethod) => {
     const targetCons = consumptions.find((c) => c.id === item.consumptionId);
     if (!targetCons) return;
+    const account = findDailyAccountOf(targetCons.id);
 
     const totalItemsInCons = targetCons.lunches.length + targetCons.extras.length;
 
     // Si el pedido solo contiene este producto, lo marcamos directamente como pagado hoy
     if (totalItemsInCons <= 1) {
-      const updated = consumptions.map((c) => {
-        if (c.id === targetCons.id) {
-          return {
-            ...c,
-            paymentStatus: 'pagado' as const,
-            paymentMethod: method,
-            paymentDate: selectedDate,
-          };
-        }
-        return c;
-      });
+      const { settled, extraPayments } = settleDailyConsumptions(account, [targetCons], method);
+      if (extraPayments.length > 0) onSavePayments([...extraPayments, ...payments]);
+      const updated = consumptions.map((c) => (c.id === targetCons.id ? settled[0] : c));
       onSaveConsumptions(updated);
       return;
     }
@@ -2245,7 +2324,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       total: remainingTotal,
     };
 
-    const paidCons: ConsumptionRecord = {
+    const paidConsDraft: ConsumptionRecord = {
       id: `cons-${Date.now()}`,
       clientId: targetCons.clientId,
       clientName: targetCons.clientName,
@@ -2262,6 +2341,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       paymentDate: selectedDate,
       notes: item.notes ? `${item.notes} (Cobrado individual)` : undefined,
     };
+    const {
+      settled: [paidCons],
+      extraPayments,
+    } = settleDailyConsumptions(account, [paidConsDraft], method);
+    if (extraPayments.length > 0) onSavePayments([...extraPayments, ...payments]);
 
     const nextConsumptions = [
       paidCons,
@@ -2272,6 +2356,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
   // Revertir un producto cobrado a estado pendiente
   const handleRevertAccountItem = (item: DailyAccountProductItem) => {
+    // Si al cobrarlo se registró un pago por el saldo restante, se anula también
+    const settlementIds = new Set([item.consumptionId]);
+    if (payments.some((p) => isSettlementPaymentOf(p, settlementIds))) {
+      onSavePayments(payments.filter((p) => !isSettlementPaymentOf(p, settlementIds)));
+    }
     const updated = consumptions.map((c) => {
       if (c.id === item.consumptionId) {
         return {
@@ -2770,28 +2859,30 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
   // Cobrar Cuenta Diaria Completa (con 1 solo clic en Efectivo o Yape)
   const handlePayDailyAccountFull = (account: DailyClientAccount, method: PaymentMethod) => {
-    // Marcamos directamente todos los consumos pendientes de esta cuenta como pagados con el método elegido
-    const updatedCons = consumptions.map((c) => {
-      const isFromAccount = account.consumptions.some((ac) => ac.id === c.id);
-      if (isFromAccount && c.paymentStatus === 'pendiente') {
-        return {
-          ...c,
-          paymentStatus: 'pagado' as const,
-          paymentMethod: method,
-          paymentDate: selectedDate,
-        };
-      }
-      return c;
-    });
-    onSaveConsumptions(updatedCons);
+    // Todos los consumos pendientes de la cuenta se marcan como pagados. Si había abonos
+    // previos, se aplican primero y solo el saldo restante entra a la caja de hoy.
+    const accountIds = new Set(account.consumptions.map((ac) => ac.id));
+    const toPay = consumptions.filter((c) => accountIds.has(c.id) && c.paymentStatus === 'pendiente');
+    const { settled, extraPayments } = settleDailyConsumptions(account, toPay, method);
+    const settledById = new Map(settled.map((c) => [c.id, c]));
+
+    if (extraPayments.length > 0) onSavePayments([...extraPayments, ...payments]);
+    onSaveConsumptions(consumptions.map((c) => settledById.get(c.id) ?? c));
   };
 
   // Revertir todos los consumos de la cuenta diaria a pendiente (deshacer cobro)
   const handleRevertDailyAccount = (account: DailyClientAccount) => {
-    // 1. Si tenía pagos/abonos registrados para esta cuenta, anularlos
-    if (account.payments.length > 0) {
-      const accountPaymentIds = new Set(account.payments.map((p) => p.id));
-      onSavePayments(payments.filter((p) => !accountPaymentIds.has(p.id)));
+    // 1. Anular los pagos/abonos de la cuenta registrados en ESTE día (los abonos de días
+    //    anteriores se conservan y vuelven a descontarse del saldo)
+    const accountIds = new Set(account.consumptions.map((ac) => ac.id));
+    const paymentIdsToRemove = new Set(
+      account.payments.filter((p) => p.date === selectedDate).map((p) => p.id)
+    );
+    payments.forEach((p) => {
+      if (isSettlementPaymentOf(p, accountIds)) paymentIdsToRemove.add(p.id);
+    });
+    if (paymentIdsToRemove.size > 0) {
+      onSavePayments(payments.filter((p) => !paymentIdsToRemove.has(p.id)));
     }
 
     // 2. Revertir consumos a pendiente

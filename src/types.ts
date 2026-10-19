@@ -63,7 +63,7 @@ export interface ConsumptionRecord {
   extras: OrderExtraItem[];
   total: number;
   paymentStatus: 'pagado' | 'pendiente';
-  paymentMethod?: PaymentMethod;
+  paymentMethod?: PaymentMethod | 'abono'; // 'abono': liquidado con abonos previos (no suma otra vez a caja)
   paymentDate?: string;
   notes?: string;
 }

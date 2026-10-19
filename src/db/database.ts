@@ -72,8 +72,9 @@ const toAccountType = (v: unknown): 'semanal' | 'diaria' => (v === 'semanal' ? '
 
 const toMethod = (v: unknown): 'efectivo' | 'yape' => (v === 'yape' ? 'yape' : 'efectivo');
 
-const toOptionalMethod = (v: unknown): 'efectivo' | 'yape' | null =>
-  v === 'yape' || v === 'efectivo' ? v : null;
+/** Método de un pedido cobrado: además de efectivo/yape puede ser 'abono' (liquidado con abonos previos). */
+const toConsumptionMethod = (v: unknown): 'efectivo' | 'yape' | 'abono' | null =>
+  v === 'yape' || v === 'efectivo' || v === 'abono' ? v : null;
 
 /**
  * Unifica variantes conocidas ('bebida' -> 'Bebidas', 'especial' -> 'Especial'…).
@@ -176,7 +177,7 @@ const consumptionsDef: TableDef<ConsumptionRecord> = {
       extras: Array.isArray(c.extras) ? c.extras : [],
       total: round2(c.total),
       payment_status: c.paymentStatus === 'pagado' ? 'pagado' : 'pendiente',
-      payment_method: toOptionalMethod(c.paymentMethod),
+      payment_method: toConsumptionMethod(c.paymentMethod),
       payment_date: toOptionalDate(c.paymentDate),
       notes: nullable(c.notes),
     };
