@@ -18,6 +18,7 @@ import {
   ExtraCategory,
 } from '../types';
 import { formatCurrency } from '../utils/pricing';
+import { buildWeeklyStatement } from '../utils/whatsappStatement';
 import { getDayOfWeekName, getTodayDateString } from '../db/database';
 import { formatPhoneForWhatsApp, formatPhoneDisplay } from '../utils/phone';
 import { ClientsDirectoryModal } from './ClientsDirectoryModal';
@@ -3513,6 +3514,18 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
   // Send WhatsApp Statement
   const generateClientWhatsAppStatement = (client: ClientRecord, monthOrWeekStr?: string) => {
+    // Estado de cuenta normal: corto, por semanas (lunes a sábado) — ver utils/whatsappStatement.ts
+    if (!monthOrWeekStr) {
+      const { message } = buildWeeklyStatement({
+        clientName: client.name,
+        consumptions: consumptions.filter((c) => c.clientId === client.id),
+        payments: payments.filter((p) => p.clientId === client.id),
+        today,
+      });
+      return encodeURIComponent(message);
+    }
+
+    // Estado de cuenta de un mes (Cobro a Fin de Mes): detalle completo del mes
     const clientConsumptions = consumptions
       .filter((c) => c.clientId === client.id)
       .filter((c) => (monthOrWeekStr ? c.date.startsWith(monthOrWeekStr) : true))
@@ -3529,7 +3542,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
     let msg = `*FUENTE DE SODA CRISS* 🍽️\n`;
     msg += `*ESTADO DE CUENTA - ${client.name.toUpperCase()}*\n`;
-    msg += `📍 *Ubicación:* ${client.piso} (${client.accountType === 'semanal' ? 'Cuenta Semanal' : 'Cuenta Diaria'})\n`;
     msg += `📅 *Fecha:* ${new Date().toLocaleDateString('es-PE')}\n`;
     msg += `--------------------------------\n`;
     msg += `*DETALLE DE CONSUMOS:*\n`;
