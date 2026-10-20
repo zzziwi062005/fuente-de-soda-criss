@@ -66,6 +66,16 @@ export interface ConsumptionRecord {
   paymentMethod?: PaymentMethod | 'abono'; // 'abono': liquidado con abonos previos (no suma otra vez a caja)
   paymentDate?: string;
   notes?: string;
+  lonche?: LoncheInfo; // Solo en pedidos anotados desde el apartado Lonches
+}
+
+/** Fases de preparación de un lonche. La hora de "anotado" es el timestamp del pedido. */
+export type LoncheStatus = 'anotado' | 'preparado' | 'listo';
+
+export interface LoncheInfo {
+  status: LoncheStatus;
+  preparedAt?: string; // ISO — cuando pasó a "preparado"
+  readyAt?: string;    // ISO — cuando pasó a "listo"
 }
 
 export interface PaymentRecord {

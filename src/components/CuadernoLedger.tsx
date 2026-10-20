@@ -16,6 +16,8 @@ import {
   MenuType,
   normalizePiso,
   ExtraCategory,
+  LoncheInfo,
+  LoncheStatus,
 } from '../types';
 import { formatCurrency } from '../utils/pricing';
 import { buildWeeklyStatement } from '../utils/whatsappStatement';
@@ -23,6 +25,7 @@ import { getDayOfWeekName, getTodayDateString } from '../db/database';
 import { formatPhoneForWhatsApp, formatPhoneDisplay } from '../utils/phone';
 import { ClientsDirectoryModal } from './ClientsDirectoryModal';
 import { MergeConsumptionsModal } from './MergeConsumptionsModal';
+import { LonchesBoard } from './LonchesBoard';
 import { normalizeClientName, findClientByName, searchClientsAutocomplete } from '../utils/clientUtils';
 import { 
   BookOpen, 
@@ -64,7 +67,8 @@ import {
   Minimize2,
   Filter,
   Coins,
-  GitMerge
+  GitMerge,
+  Sandwich
 } from 'lucide-react';
 
 export const EXTRA_CATEGORIES: ExtraCategory[] = ['Bebidas', 'Panes', 'Extras', 'Especial', 'Dulces'];
@@ -107,7 +111,7 @@ interface CuadernoLedgerProps {
   onImportBackup: (jsonStr: string) => void;
 }
 
-type CuadernoTab = 'semanales' | 'diarias' | 'caja' | 'cobro_mensual';
+type CuadernoTab = 'semanales' | 'diarias' | 'caja' | 'lonches';
 
 export interface DailyAccountProductItem {
   id: string;
@@ -170,7 +174,7 @@ export const isPaymentDa = (p: PaymentRecord): boolean =>
 
 export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   clients,
-  consumptions,
+  consumptions: rawConsumptions,
   payments,
   mesaRecords,
   extrasCatalog,
@@ -183,10 +187,21 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   onExportBackup,
   onImportBackup,
 }) => {
+  // Un pedido de un cliente con Cuenta Semanal pertenece SOLO a su cuenta semanal, aunque
+  // se haya anotado por error desde Cuentas Diarias (antes aparecía duplicado en ambos lados).
+  // Al siguiente guardado el pedido corregido queda grabado así en la base de datos.
+  const consumptions = useMemo<ConsumptionRecord[]>(() => {
+    const weeklyClientIds = new Set(clients.filter((c) => c.accountType === 'semanal').map((c) => c.id));
+    const isMisfiled = (c: ConsumptionRecord) =>
+      c.accountType === 'diaria' && !!c.clientId && weeklyClientIds.has(c.clientId);
+    if (!rawConsumptions.some(isMisfiled)) return rawConsumptions;
+    return rawConsumptions.map((c) => (isMisfiled(c) ? { ...c, accountType: 'semanal' as const } : c));
+  }, [rawConsumptions, clients]);
+
   // Navigation within the sales register (Registro de Ventas) - Persistente
   const [activeTab, setActiveTab] = useState<CuadernoTab>(() => {
     const saved = localStorage.getItem('criss_active_tab');
-    if (saved === 'semanales' || saved === 'diarias' || saved === 'caja' || saved === 'fin_de_mes') {
+    if (saved === 'semanales' || saved === 'diarias' || saved === 'caja' || saved === 'lonches') {
       return saved as CuadernoTab;
     }
     return 'semanales';
@@ -211,18 +226,12 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     return localStorage.getItem('criss_selected_date') || today;
   });
 
-  // Month selection for monthly billing (YYYY-MM)
+  // Mes actual (YYYY-MM) para las métricas del banner
   const currentYearMonth = today.substring(0, 7);
-  const [selectedMonth, setSelectedMonth] = useState<string>(currentYearMonth);
-
-  // Sub-view in Cobro a Fin de Mes: 'liquidaciones' (cuentas semanales en lista) vs 'resumen_diario' (total cobrado por día)
-  const [finDeMesSubView, setFinDeMesSubView] = useState<'liquidaciones' | 'resumen_diario'>('liquidaciones');
 
   // Search term
   const [searchTerm, setSearchTerm] = useState<string>('');
 
-  // Selected client for statement modal / WhatsApp
-  const [statementClient, setStatementClient] = useState<ClientRecord | null>(null);
 
   // Modal: Agregar / Editar Consumo
   const [showAddConsumptionModal, setShowAddConsumptionModal] = useState<boolean>(false);
@@ -244,6 +253,8 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     paymentStatus: 'pagado' | 'pendiente';
     paymentMethod: PaymentMethod;
     phone?: string;
+    pickClient?: boolean; // Pedido nuevo donde se elige/crea la persona (Diarias o Lonches)
+    isLonche?: boolean;   // Pedido del apartado Lonches: solo adicionales, sin menú
   } | null>(null);
 
   // Registro de vueltos pendientes en clientes cobrados
@@ -418,7 +429,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     }
   }, [openNewClientSignal, activeTab, selectedPiso]);
   const [cajaViewMode, setCajaViewMode] = useState<'dia' | 'semana' | 'ambas'>('dia');
-  const [cobroMensualSubView, setCobroMensualSubView] = useState<'semanales_lista' | 'totales_diarios'>('semanales_lista');
   const [cajaListFilter, setCajaListFilter] = useState<'todos' | 'mesa' | 'diarias' | 'abonos'>('todos');
 
   // Modal: Editar Cliente
@@ -1063,74 +1073,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     setMesaUpdateFeedback(null);
   }, [selectedDate, currentMesaRecord]);
 
-  // Resumen Diario del Mes para Cobro a Fin de Mes (totales por día sin mostrar listas por persona)
-  const daysInSelectedMonth = useMemo(() => {
-    const [yearStr, monthStr] = selectedMonth.split('-');
-    const year = parseInt(yearStr);
-    const month = parseInt(monthStr);
-    if (isNaN(year) || isNaN(month)) return [];
-
-    const numDays = new Date(year, month, 0).getDate();
-    const list = [];
-    for (let d = 1; d <= numDays; d++) {
-      const dayStr = String(d).padStart(2, '0');
-      const date = `${yearStr}-${monthStr}-${dayStr}`;
-      const dayOfWeek = getDayOfWeekName(date);
-      const jsDay = new Date(year, month - 1, d).getDay();
-      if (jsDay === 0) continue; // Domingo cerrado
-
-      // Mesa de ese día
-      const mesa = mesaRecords.find((m) => m.date === date);
-      const mesaTotal = mesa ? mesa.totalAmount : 0;
-      const mesaCash = mesa ? mesa.efectivoAmount : 0;
-      const mesaYape = mesa ? mesa.yapeAmount : 0;
-
-      // Consumos diarios cobrados en ese día
-      let dailyCash = 0;
-      let dailyYape = 0;
-      let dailyCount = 0;
-      consumptions
-        .filter(
-          (c) =>
-            c.accountType === 'diaria' &&
-            c.paymentStatus === 'pagado' &&
-            c.paymentMethod !== 'abono' &&
-            (c.paymentDate === date || (!c.paymentDate && c.date === date))
-        )
-        .forEach((c) => {
-          dailyCount++;
-          if (c.paymentMethod === 'yape') {
-            dailyYape += c.total;
-          } else {
-            dailyCash += c.total;
-          }
-        });
-
-      const dailyTotal = dailyCash + dailyYape;
-      const totalDia = mesaTotal + dailyTotal;
-      const totalCash = mesaCash + dailyCash;
-      const totalYape = mesaYape + dailyYape;
-
-      list.push({
-        date,
-        dayNumber: d,
-        dayOfWeek,
-        mesaTotal,
-        mesaCash,
-        mesaYape,
-        dailyTotal,
-        dailyCash,
-        dailyYape,
-        dailyCount,
-        totalDia,
-        totalCash,
-        totalYape,
-        hasActivity: totalDia > 0,
-      });
-    }
-    return list;
-  }, [selectedMonth, mesaRecords, consumptions]);
-
   // Calculations for Caja of the Selected Date
   const cajaDelDia = useMemo(() => {
     const rawMesaCash = currentMesaRecord ? currentMesaRecord.efectivoAmount : 0;
@@ -1481,8 +1423,49 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       paymentStatus: 'pendiente',
       paymentMethod: 'efectivo',
       phone: '',
+      pickClient: true,
     });
     setShowAddConsumptionModal(true);
+  };
+
+  // Anotar un lonche: mismo buscador de clientes que los pedidos, pero solo con adicionales
+  const handleOpenNewLoncheOrder = () => {
+    const defaultFloor = selectedPiso !== 'todos' && selectedPiso !== 'Mesa' ? selectedPiso : '1ro';
+    setConsumptionDraft({
+      clientId: '',
+      clientName: '',
+      piso: defaultFloor,
+      accountType: 'diaria',
+      date: selectedDate,
+      dayOfWeek: getDayOfWeekName(selectedDate),
+      locationType: 'tienda',
+      menuType: 'menu_completo',
+      lunchQuantity: 0,
+      completoQuantity: 0,
+      segundoSoloQuantity: 0,
+      selectedExtras: [],
+      notes: '',
+      paymentStatus: 'pendiente',
+      paymentMethod: 'efectivo',
+      phone: '',
+      pickClient: true,
+      isLonche: true,
+    });
+    setShowAddConsumptionModal(true);
+  };
+
+  // Avanza o regresa la fase de un lonche guardando la hora de cada paso
+  const handleSetLoncheStatus = (consumptionId: string, status: LoncheStatus) => {
+    const nowIso = new Date().toISOString();
+    onSaveConsumptions(
+      consumptions.map((c) => {
+        if (c.id !== consumptionId || !c.lonche) return c;
+        const lonche: LoncheInfo = { status };
+        if (status === 'preparado' || status === 'listo') lonche.preparedAt = c.lonche.preparedAt || nowIso;
+        if (status === 'listo') lonche.readyAt = c.lonche.readyAt || nowIso;
+        return { ...c, lonche };
+      })
+    );
   };
 
   const handleOpenEditConsumption = (consumption: ConsumptionRecord) => {
@@ -1540,6 +1523,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       paymentStatus: consumption.paymentStatus || 'pendiente',
       paymentMethod: consumption.paymentMethod || 'efectivo',
       phone: clientPhone,
+      isLonche: Boolean(consumption.lonche),
     });
     setShowAddConsumptionModal(true);
   };
@@ -1635,8 +1619,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     const priceCompleto = BASE_PRICES[locType]['menu_completo'];
     const priceSegundo = BASE_PRICES[locType]['solo_segundo'];
 
-    const completoCount = Math.max(0, consumptionDraft.completoQuantity ?? 0);
-    const segundoCount = Math.max(0, consumptionDraft.segundoSoloQuantity ?? 0);
+    const isLoncheOrder = Boolean(consumptionDraft.isLonche);
+    const completoCount = isLoncheOrder ? 0 : Math.max(0, consumptionDraft.completoQuantity ?? 0);
+    const segundoCount = isLoncheOrder ? 0 : Math.max(0, consumptionDraft.segundoSoloQuantity ?? 0);
     const totalLunchQty = completoCount + segundoCount;
 
     const totalCompleto = priceCompleto * completoCount;
@@ -1657,6 +1642,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     const grandTotal = lunchTotal + extrasTotal;
 
     // Validación: debe haber al menos 1 menú (completo o segundo solo) o al menos 1 adicional/bebida
+    if (isLoncheOrder && extrasOrderList.length === 0) {
+      alert('Agrega al menos 1 producto al lonche.');
+      return;
+    }
     if (totalLunchQty <= 0 && extrasOrderList.length === 0) {
       alert('Debes indicar al menos 1 menú (completo o segundo solo) o agregar al menos 1 bebida/adicional.');
       return;
@@ -1674,10 +1663,12 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     let finalClientId = consumptionDraft.clientId;
     let finalClientName = clientNameClean;
     let finalPiso = selectedFloor;
-    const isDaily = consumptionDraft.accountType === 'diaria';
+    // La cuenta (diaria o semanal) la decide el cliente: si se anota desde Diarias o Lonches
+    // a alguien con Cuenta Semanal, el pedido va solo a su cuenta semanal.
+    let finalAccountType: 'semanal' | 'diaria' = consumptionDraft.accountType;
+    const resolveClient = consumptionDraft.accountType === 'diaria' || Boolean(consumptionDraft.pickClient);
 
-    // If it's a daily order:
-    if (isDaily) {
+    if (resolveClient) {
       if (!finalClientId || finalClientId === '__new__' || !clients.some((c) => c.id === finalClientId)) {
         // Check if a client with the same name already exists (case and accent insensitive)
         const existingClient = findClientByName(clients, clientNameClean);
@@ -1686,6 +1677,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           finalClientId = existingClient.id;
           finalClientName = existingClient.name;
           finalPiso = selectedFloor;
+          finalAccountType = existingClient.accountType;
           // Synchronize floor on existing client record if changed
           if (normalizePiso(existingClient.piso) !== selectedFloor) {
             onSaveClients(
@@ -1709,10 +1701,12 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           };
           onSaveClients([...clients, newClient]);
           finalClientId = newClientId;
+          finalAccountType = 'diaria';
         }
       } else {
         // Existing client chosen: update floor in client record if changed!
         const existingClient = clients.find((c) => c.id === finalClientId);
+        if (existingClient) finalAccountType = existingClient.accountType;
         if (existingClient && normalizePiso(existingClient.piso) !== selectedFloor) {
           onSaveClients(
             clients.map((c) => (c.id === finalClientId ? { ...c, piso: selectedFloor } : c))
@@ -1756,7 +1750,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         clientId: finalClientId || consumptionDraft.clientId,
         clientName: finalClientName,
         piso: finalPiso,
-        accountType: consumptionDraft.accountType,
+        accountType: finalAccountType,
         date: consumptionDraft.date,
         dayOfWeek: consumptionDraft.dayOfWeek,
         lunches: lunchItems,
@@ -1776,7 +1770,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         clientId: finalClientId || consumptionDraft.clientId,
         clientName: finalClientName,
         piso: finalPiso,
-        accountType: consumptionDraft.accountType,
+        accountType: finalAccountType,
         date: consumptionDraft.date,
         dayOfWeek: consumptionDraft.dayOfWeek,
         timestamp: new Date().toISOString(),
@@ -1787,12 +1781,15 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         paymentMethod: consumptionDraft.paymentStatus === 'pagado' ? consumptionDraft.paymentMethod : undefined,
         paymentDate: consumptionDraft.paymentStatus === 'pagado' ? consumptionDraft.date : undefined,
         notes: consumptionDraft.notes.trim() || undefined,
+        ...(isLoncheOrder ? { lonche: { status: 'anotado' as const } } : {}),
       };
 
       onSaveConsumptions([newConsumption, ...consumptions]);
     }
 
-    if (isDaily) {
+    if (isLoncheOrder) {
+      setActiveTab('lonches');
+    } else if (resolveClient && finalAccountType === 'diaria') {
       setActiveTab('diarias');
     }
 
@@ -2481,6 +2478,23 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   };
 
   // Revertir cobro de un pedido individual dentro de un día de cuenta semanal
+  // Cobrar un lonche desde "Listos": mismo cobro que en Cuentas Diarias (aplica abonos
+  // abiertos) o en Cuentas Semanales (pagado directo), según la cuenta del cliente.
+  const handlePayLonche = (consumptionId: string, method: PaymentMethod) => {
+    const cons = consumptions.find((c) => c.id === consumptionId);
+    if (!cons || cons.paymentStatus === 'pagado') return;
+    if (cons.accountType === 'semanal') {
+      const client = clients.find((c) => c.id === cons.clientId);
+      if (client) {
+        handlePayWeeklyConsumption(client, cons, method);
+        return;
+      }
+    }
+    const { settled, extraPayments } = settleDailyConsumptions(findDailyAccountOf(cons.id), [cons], method);
+    if (extraPayments.length > 0) onSavePayments([...extraPayments, ...payments]);
+    onSaveConsumptions(consumptions.map((c) => (c.id === cons.id ? settled[0] : c)));
+  };
+
   const handleRevertWeeklyConsumption = (
     client: ClientRecord,
     cons: ConsumptionRecord
@@ -2706,9 +2720,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     }
 
     // Buscar si ya existe un consumo diario pendiente para este cliente en la fecha seleccionada
+    // (los lonches se mantienen como pedido aparte para su seguimiento)
     const existingCons = consumptions.find(
       (c) =>
         c.accountType === 'diaria' &&
+        !c.lonche &&
         (c.clientId === targetAccount.clientId ||
           c.clientName.trim().toLowerCase() === targetAccount.clientName.trim().toLowerCase()) &&
         c.date === targetDate &&
@@ -3513,77 +3529,24 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   };
 
   // Send WhatsApp Statement
-  const generateClientWhatsAppStatement = (client: ClientRecord, monthOrWeekStr?: string) => {
+  const generateClientWhatsAppStatement = (client: ClientRecord) => {
     // Estado de cuenta normal: corto, por semanas (lunes a sábado) — ver utils/whatsappStatement.ts
-    if (!monthOrWeekStr) {
-      const { message } = buildWeeklyStatement({
-        clientName: client.name,
-        consumptions: consumptions.filter((c) => c.clientId === client.id),
-        payments: payments.filter((p) => p.clientId === client.id),
-        today,
-      });
-      return encodeURIComponent(message);
-    }
-
-    // Estado de cuenta de un mes (Cobro a Fin de Mes): detalle completo del mes
-    const clientConsumptions = consumptions
-      .filter((c) => c.clientId === client.id)
-      .filter((c) => (monthOrWeekStr ? c.date.startsWith(monthOrWeekStr) : true))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    const clientPayments = payments
-      .filter((p) => p.clientId === client.id)
-      .filter((p) => (monthOrWeekStr ? p.date.startsWith(monthOrWeekStr) : true))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    const totalConsumo = clientConsumptions.reduce((s, c) => s + c.total, 0);
-    const totalAbonado = clientPayments.reduce((s, p) => s + p.amount, 0);
-    const saldoPendiente = Math.max(0, totalConsumo - totalAbonado);
-
-    let msg = `*FUENTE DE SODA CRISS* 🍽️\n`;
-    msg += `*ESTADO DE CUENTA - ${client.name.toUpperCase()}*\n`;
-    msg += `📅 *Fecha:* ${new Date().toLocaleDateString('es-PE')}\n`;
-    msg += `--------------------------------\n`;
-    msg += `*DETALLE DE CONSUMOS:*\n`;
-
-    if (clientConsumptions.length === 0) {
-      msg += `No registra consumos en este período.\n`;
-    } else {
-      clientConsumptions.forEach((c) => {
-        const d = c.date.split('-').slice(1).reverse().join('/');
-        const lunchSummary = c.lunches.map((l) => {
-          const name = l.menuType === 'menu_completo' ? 'Menú Completo' : 'Segundo Solo';
-          const loc = l.clientType === 'mesa' ? ' (Mesa)' : '';
-          return `${l.quantity}x ${name}${loc}`;
-        }).join(', ');
-        const extrasSummary = c.extras.map((e) => `${e.quantity}x ${e.name}`).join(', ');
-        // Solo se une con " + " cuando hay almuerzos y extras (evita "  + 1x Cubana" en pedidos de solo extras)
-        const itemsSummary = [lunchSummary, extrasSummary].filter(Boolean).join(' + ') || 'Consumo';
-        msg += `• ${c.dayOfWeek} ${d}: ${itemsSummary} -> *${formatCurrency(c.total)}*\n`;
-      });
-    }
-
-    msg += `--------------------------------\n`;
-    msg += `*HISTORIAL DE ABONOS:*\n`;
-    if (clientPayments.length === 0) {
-      msg += `Sin abonos registrados aún.\n`;
-    } else {
-      clientPayments.forEach((p) => {
-        const d = p.date.split('-').slice(1).reverse().join('/');
-        msg += `✅ ${p.dayOfWeek} ${d}: Abono de *${formatCurrency(p.amount)}* (${p.method.toUpperCase()})\n`;
-      });
-    }
-
-    msg += `--------------------------------\n`;
-    msg += `🍽️ *TOTAL CONSUMIDO:* ${formatCurrency(totalConsumo)}\n`;
-    msg += `💵 *TOTAL ABONADO:* ${formatCurrency(totalAbonado)}\n`;
-    msg += `⚠️ *SALDO PENDIENTE: ${formatCurrency(saldoPendiente)}*\n\n`;
-    msg += `_¡Muchas gracias por su preferencia! Fuente de Soda Criss._`;
-
-    return encodeURIComponent(msg);
+    const { message } = buildWeeklyStatement({
+      clientName: client.name,
+      consumptions: consumptions.filter((c) => c.clientId === client.id),
+      payments: payments.filter((p) => p.clientId === client.id),
+      today,
+    });
+    return encodeURIComponent(message);
   };
 
-  const handleSendWhatsApp = (client: ClientRecord, monthOrWeekStr?: string) => {
+  // Lonches de hoy que aún no están listos (contador en la pestaña)
+  const pendingLonchesCount = useMemo(
+    () => consumptions.filter((c) => c.lonche && c.date === today && c.lonche.status !== 'listo').length,
+    [consumptions, today]
+  );
+
+  const handleSendWhatsApp = (client: ClientRecord) => {
     let rawPhone = client.phone ? client.phone.trim() : '';
     if (!rawPhone) {
       const userEntered = window.prompt(
@@ -3598,7 +3561,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     }
 
     const waPhone = formatPhoneForWhatsApp(rawPhone);
-    const msg = generateClientWhatsAppStatement({ ...client, phone: rawPhone }, monthOrWeekStr);
+    const msg = generateClientWhatsAppStatement({ ...client, phone: rawPhone });
     // Enlace directo a api.whatsapp.com: el atajo wa.me redirige y en esa redirección
     // daña los emojis del texto (aparecen como "�"), sobre todo en WhatsApp de escritorio.
     const url = `https://api.whatsapp.com/send?phone=${waPhone}&text=${msg}`;
@@ -3690,7 +3653,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         </div>
       </div>
 
-      {/* Sub-tab Navigation (Cuentas Semanales, Cuentas Diarias con Mesa, Caja Día y Semana, Cobro a Fin de Mes) */}
+      {/* Sub-tab Navigation (Cuentas Semanales, Cuentas Diarias con Mesa, Caja Día y Semana, Lonches) */}
       <div className="bg-white rounded-2xl p-1.5 border border-stone-200 shadow-xs">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
           <button
@@ -3740,21 +3703,26 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
           <button
             type="button"
-            onClick={() => setActiveTab('cobro_mensual')}
+            onClick={() => setActiveTab('lonches')}
             className={`py-3 px-3 rounded-xl font-bold text-xs sm:text-sm flex flex-col sm:flex-row items-center justify-center gap-1.5 sm:gap-2 transition-all ${
-              activeTab === 'cobro_mensual'
-                ? 'bg-stone-900 text-white shadow-sm'
+              activeTab === 'lonches'
+                ? 'bg-orange-700 text-white shadow-sm ring-2 ring-orange-500/30'
                 : 'text-stone-700 hover:bg-stone-100'
             }`}
           >
-            <Receipt className="w-4 h-4 text-amber-400" />
-            <span>Cobro a Fin de Mes</span>
+            <Sandwich className="w-4 h-4" />
+            <span>Lonches</span>
+            {pendingLonchesCount > 0 && (
+              <span className="text-[10px] sm:text-xs font-black px-1.5 py-0.5 rounded-full bg-amber-400 text-amber-950">
+                {pendingLonchesCount}
+              </span>
+            )}
           </button>
         </div>
       </div>
 
       {/* Global Filter Toolbar for Piso and Search */}
-      {(activeTab === 'semanales' || activeTab === 'diarias' || activeTab === 'cobro_mensual') && (
+      {(activeTab === 'semanales' || activeTab === 'diarias') && (
         <div className="bg-white rounded-2xl p-3.5 border border-stone-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
           {/* Piso / Calle Pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 max-w-full">
@@ -6359,292 +6327,18 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* 5. TAB: COBRO A FIN DE MES (Liquidación por cliente, estados de cuenta)   */}
+      {/* 5. TAB: LONCHES (seguimiento: anotado → preparado → listo)                */}
       {/* ========================================================================= */}
-      {activeTab === 'cobro_mensual' && (
-        <div className="space-y-4">
-          <div className="bg-stone-900 text-white rounded-2xl p-4 sm:p-5 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <Receipt className="w-6 h-6 text-amber-400" />
-                <h3 className="text-lg sm:text-xl font-black">
-                  Liquidación y Cobro a Fin de Mes
-                </h3>
-              </div>
-              <p className="text-xs sm:text-sm text-stone-300 mt-1">
-                Genera el cobro consolidado mensual con consumos, abonos recibidos y saldo pendiente para cada cliente o tienda.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-stone-300">Mes a liquidar:</label>
-              <input
-                type="month"
-                value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                className="text-xs font-bold px-3 py-1.5 bg-stone-800 border border-stone-700 rounded-lg text-white focus:outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Subview Selector: Cuentas Semanales en Lista vs Totales Cobrados por Día */}
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-stone-200 shadow-xs">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setCobroMensualSubView('semanales_lista')}
-                className={`px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-all ${
-                  cobroMensualSubView === 'semanales_lista'
-                    ? 'bg-amber-800 text-white shadow-xs'
-                    : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-                }`}
-              >
-                <Users className="w-4 h-4" />
-                <span>Liquidación Semanales (Lista)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setCobroMensualSubView('totales_diarios')}
-                className={`px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-all ${
-                  cobroMensualSubView === 'totales_diarios'
-                    ? 'bg-amber-800 text-white shadow-xs'
-                    : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-                }`}
-              >
-                <Calendar className="w-4 h-4" />
-                <span>Total Cobrado por Día (Mes)</span>
-              </button>
-            </div>
-
-            <div className="text-xs text-stone-500 font-medium">
-              {cobroMensualSubView === 'semanales_lista'
-                ? `Mostrando únicamente clientes semanales para liquidación`
-                : `Resumen global diario (sin mostrar nombres de clientes diarios)`}
-            </div>
-          </div>
-
-          {/* VISTA 1: LISTA DE LIQUIDACIÓN DE CLIENTES SEMANALES (SIN CUADROS, EN FORMATO LISTA) */}
-          {cobroMensualSubView === 'semanales_lista' && (
-            <div className="bg-white rounded-2xl border border-stone-200 shadow-xs overflow-hidden">
-              <div className="p-4 border-b border-stone-200 flex items-center justify-between">
-                <div>
-                  <h4 className="font-extrabold text-stone-900 text-sm sm:text-base">
-                    Cuentas Semanales a Liquidar — {selectedMonth}
-                  </h4>
-                  <p className="text-xs text-stone-500">
-                    Lista ordenada de cobro de clientes semanales. Los que pagan diario no figuran aquí.
-                  </p>
-                </div>
-                <div className="text-xs font-bold text-stone-600">
-                  Total clientes semanales: {filteredClients.filter((c) => c.accountType === 'semanal').length}
-                </div>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-stone-50 border-b border-stone-200 text-stone-600 font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-3 px-4">Cliente / Puesto</th>
-                      <th className="py-3 px-3">Ubicación</th>
-                      <th className="py-3 px-3 text-center">Pedidos Mes</th>
-                      <th className="py-3 px-3 text-right">Total Consumido</th>
-                      <th className="py-3 px-3 text-right">Abonos Recibidos</th>
-                      <th className="py-3 px-3 text-right">Saldo Pendiente</th>
-                      <th className="py-3 px-4 text-center">Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {filteredClients
-                      .filter((c) => c.accountType === 'semanal')
-                      .map((client) => {
-                        const clientConsumptions = consumptions.filter(
-                          (c) => c.clientId === client.id && c.date.startsWith(selectedMonth)
-                        );
-                        const totalConsumed = clientConsumptions.reduce((s, c) => s + c.total, 0);
-
-                        const clientPayments = payments.filter(
-                          (p) => p.clientId === client.id && p.date.startsWith(selectedMonth)
-                        );
-                        const totalPaid = clientPayments.reduce((s, p) => s + p.amount, 0);
-                        const balance = totalConsumed - totalPaid;
-
-                        return (
-                          <tr key={client.id} className="hover:bg-amber-50/30 transition-colors">
-                            <td className="py-3 px-4">
-                              <div className="font-extrabold text-stone-900 text-sm">
-                                {client.name}
-                              </div>
-                              {client.phone && (
-                                <span className="text-[11px] text-stone-500">
-                                  📞 {formatPhoneDisplay(client.phone)}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3 px-3 whitespace-nowrap">
-                              <span
-                                className={`px-2 py-0.5 rounded text-[11px] font-bold border ${
-                                  client.piso === 'Calle'
-                                    ? 'bg-blue-100 text-blue-900 border-blue-200'
-                                    : 'bg-stone-100 text-stone-800 border-stone-200'
-                                }`}
-                              >
-                                {client.piso === 'Calle' ? '🚶 Calle' : client.piso}
-                              </span>
-                            </td>
-                            <td className="py-3 px-3 text-center font-bold text-stone-700">
-                              {clientConsumptions.length}
-                            </td>
-                            <td className="py-3 px-3 text-right font-black text-stone-900">
-                              {formatCurrency(totalConsumed)}
-                            </td>
-                            <td className="py-3 px-3 text-right font-bold text-emerald-800">
-                              {formatCurrency(totalPaid)}
-                            </td>
-                            <td className="py-3 px-3 text-right whitespace-nowrap">
-                              <span
-                                className={`text-sm font-black px-2 py-0.5 rounded-lg ${
-                                  balance > 0
-                                    ? 'bg-rose-100 text-rose-800'
-                                    : 'bg-emerald-100 text-emerald-800'
-                                }`}
-                              >
-                                {formatCurrency(Math.max(0, balance))}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenPaymentModal(client)}
-                                  className="py-1 px-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-bold text-[11px] shadow-xs flex items-center gap-1 transition-colors"
-                                  title="Abonar a esta cuenta"
-                                >
-                                  <DollarSign className="w-3 h-3" />
-                                  <span>+ Abono</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => setStatementClient(client)}
-                                  className="py-1 px-2.5 bg-stone-800 hover:bg-stone-900 text-white rounded-lg font-bold text-[11px] transition-colors"
-                                  title="Ver detalle del estado de cuenta"
-                                >
-                                  Estado
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => handleSendWhatsApp(client, selectedMonth)}
-                                  className="p-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg transition-colors"
-                                  title="Enviar detalle a WhatsApp (+51)"
-                                >
-                                  <Share2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* VISTA 2: TOTAL COBRADO POR DÍA EN EL MES (SIN MOSTRAR PERSONAS DIARIAS) */}
-          {cobroMensualSubView === 'totales_diarios' && (
-            <div className="bg-white rounded-2xl border border-stone-200 shadow-xs overflow-hidden space-y-4">
-              <div className="p-4 border-b border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h4 className="font-extrabold text-stone-900 text-sm sm:text-base flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-amber-700" />
-                    <span>Total Cobrado Cada Día en el Mes ({selectedMonth})</span>
-                  </h4>
-                  <p className="text-xs text-stone-500">
-                    Muestra el total recaudado por día (Mesa + Cuentas Diarias cobradas) sin listar nombres de personas diarias.
-                  </p>
-                </div>
-
-                <div className="text-right">
-                  <span className="text-[11px] uppercase font-bold text-stone-500 block">Total Recaudado en el Mes:</span>
-                  <span className="text-base sm:text-lg font-black text-amber-950">
-                    {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.totalDia, 0))}
-                  </span>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto px-4 pb-4">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-stone-100 border-b border-stone-200 text-stone-700 font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-2.5 px-3">Fecha y Día</th>
-                      <th className="py-2.5 px-3 text-right">Cobrado en Mesa</th>
-                      <th className="py-2.5 px-3 text-right">Cuentas Diarias</th>
-                      <th className="py-2.5 px-3 text-right text-stone-900">Total del Día</th>
-                      <th className="py-2.5 px-3 text-right text-emerald-800">Efectivo</th>
-                      <th className="py-2.5 px-3 text-right text-purple-800">Yape</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {daysInSelectedMonth.map((row) => (
-                      <tr
-                        key={row.date}
-                        className={`hover:bg-amber-50/40 transition-colors ${
-                          !row.hasActivity ? 'opacity-40' : ''
-                        }`}
-                      >
-                        <td className="py-2.5 px-3 font-mono font-bold text-stone-800 whitespace-nowrap">
-                          {row.dayOfWeek} {row.date.substring(8, 10)}/{row.date.substring(5, 7)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-medium text-stone-800">
-                          {formatCurrency(row.mesaTotal)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-medium text-stone-800">
-                          {formatCurrency(row.dailyTotal)}
-                          {row.dailyCount > 0 && (
-                            <span className="text-[10px] text-stone-500 ml-1">
-                              ({row.dailyCount} cobros)
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-black text-stone-900 text-sm">
-                          {formatCurrency(row.totalDia)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-emerald-800">
-                          {formatCurrency(row.totalCash)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-purple-800">
-                          {formatCurrency(row.totalYape)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="bg-stone-200 border-t-2 border-stone-400 font-black text-stone-950">
-                      <td className="py-3 px-3 uppercase">Total Acumulado del Mes:</td>
-                      <td className="py-3 px-3 text-right">
-                        {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.mesaTotal, 0))}
-                      </td>
-                      <td className="py-3 px-3 text-right">
-                        {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.dailyTotal, 0))}
-                      </td>
-                      <td className="py-3 px-3 text-right text-base text-amber-950">
-                        {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.totalDia, 0))}
-                      </td>
-                      <td className="py-3 px-3 text-right text-emerald-900">
-                        {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.totalCash, 0))}
-                      </td>
-                      <td className="py-3 px-3 text-right text-purple-900">
-                        {formatCurrency(daysInSelectedMonth.reduce((s, d) => s + d.totalYape, 0))}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
+      {activeTab === 'lonches' && (
+        <LonchesBoard
+          consumptions={consumptions}
+          date={selectedDate}
+          onChangeDate={setSelectedDate}
+          onPay={handlePayLonche}
+          onNewLonche={handleOpenNewLoncheOrder}
+          onEditLonche={handleOpenEditConsumption}
+          onSetStatus={handleSetLoncheStatus}
+        />
       )}
 
       {/* ========================================================================= */}
@@ -6657,14 +6351,20 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
             <div className="bg-amber-800 text-white p-4 flex items-center justify-between">
               <div>
                 <span className="text-xs text-amber-200 uppercase font-bold tracking-wider">
-                  {consumptionDraft.accountType === 'semanal'
+                  {consumptionDraft.isLonche
+                    ? `🥪 Lonche • ${consumptionDraft.accountType === 'semanal' ? 'Cuenta Semanal' : 'Cuenta Diaria'}`
+                    : consumptionDraft.accountType === 'semanal'
                     ? `${consumptionDraft.piso} • Cuenta Semanal`
                     : 'Cuenta Diaria (Tienda / Salón / Calle)'}
                 </span>
                 <h3 className="font-black text-base sm:text-lg">
-                  {consumptionDraft.id
+                  {consumptionDraft.isLonche
+                    ? consumptionDraft.id
+                      ? `Editar Lonche: ${consumptionDraft.clientName}`
+                      : 'Anotar Lonche'
+                    : consumptionDraft.id
                     ? `Editar Pedido: ${consumptionDraft.clientName}`
-                    : consumptionDraft.accountType === 'diaria' && !consumptionDraft.clientName
+                    : consumptionDraft.pickClient && !consumptionDraft.clientId
                     ? 'Anotar Nuevo Pedido Diario'
                     : `Anotar Pedido: ${consumptionDraft.clientName}`}
                 </h3>
@@ -6684,8 +6384,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
             {/* Modal Body */}
             <form onSubmit={handleSaveConsumption} className="p-4 sm:p-5 space-y-4 max-h-[80vh] overflow-y-auto">
               {/* ASIGNACIÓN DE PERSONA O PUESTO (CUENTAS DIARIAS) */}
-              {consumptionDraft.accountType === 'diaria' && (() => {
+              {(consumptionDraft.accountType === 'diaria' || consumptionDraft.pickClient) && (() => {
                 const selectedOrderClient = clients.find((c) => c.id === consumptionDraft.clientId);
+                const goesToWeekly = selectedOrderClient?.accountType === 'semanal';
                 return (
                   <div className="p-3.5 bg-amber-50/90 rounded-2xl border border-amber-300 space-y-3 shadow-2xs">
                     <div className="flex items-center justify-between">
@@ -6693,8 +6394,8 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                         <UserPlus className="w-4 h-4 text-amber-800" />
                         <span>Asignar a Persona o Puesto:</span>
                       </label>
-                      <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-200 text-amber-950 rounded-md">
-                        Cuenta Diaria
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${goesToWeekly ? 'bg-indigo-200 text-indigo-950' : 'bg-amber-200 text-amber-950'}`}>
+                        {goesToWeekly ? 'Cuenta Semanal' : 'Cuenta Diaria'}
                       </span>
                     </div>
 
@@ -6730,6 +6431,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                             setConsumptionDraft({
                               ...consumptionDraft,
                               clientId: '',
+                              accountType: consumptionDraft.pickClient ? 'diaria' : consumptionDraft.accountType,
                             });
                           }}
                           className="text-xs text-amber-900 hover:text-amber-950 font-bold underline px-2 py-1"
@@ -6755,6 +6457,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                   ...consumptionDraft,
                                   clientName: e.target.value,
                                   clientId: '',
+                                  accountType: consumptionDraft.pickClient ? 'diaria' : consumptionDraft.accountType,
                                 })
                               }
                               className="w-full text-xs font-bold pl-9 pr-3 py-2 bg-white border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -6774,12 +6477,16 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                   key={client.id}
                                   type="button"
                                   onClick={() => {
+                                    const toWeekly = Boolean(consumptionDraft.pickClient) && client.accountType === 'semanal';
                                     setConsumptionDraft({
                                       ...consumptionDraft,
                                       clientId: client.id,
                                       clientName: client.name,
                                       piso: client.piso,
                                       phone: client.phone || '',
+                                      // El pedido va a la cuenta que ya tiene el cliente (semanal = se cobra en su semana)
+                                      accountType: consumptionDraft.pickClient ? client.accountType : consumptionDraft.accountType,
+                                      paymentStatus: toWeekly ? 'pendiente' : consumptionDraft.paymentStatus,
                                     });
                                   }}
                                   className="w-full text-left p-2.5 hover:bg-amber-50/90 flex items-center justify-between gap-2 transition-colors group cursor-pointer"
@@ -6872,9 +6579,19 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                       </div>
                     </div>
 
-                    <p className="text-[10px] text-amber-900 font-medium">
-                      ℹ️ Esta persona se guardará en <strong>Cuentas Diarias</strong> al momento de anotar el pedido (no irá a cuentas semanales).
-                    </p>
+                    {goesToWeekly ? (
+                      <p className="text-[10px] text-indigo-900 font-medium">
+                        ℹ️ {selectedOrderClient!.name} tiene <strong>Cuenta Semanal</strong>: este pedido se anotará solo en su cuenta semanal.
+                      </p>
+                    ) : selectedOrderClient ? (
+                      <p className="text-[10px] text-amber-900 font-medium">
+                        ℹ️ Este pedido se anotará en su <strong>Cuenta Diaria</strong>.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-amber-900 font-medium">
+                        ℹ️ Si es una persona nueva, se guardará en <strong>Cuentas Diarias</strong> al anotar el pedido.
+                      </p>
+                    )}
                   </div>
                 );
               })()}
@@ -6905,6 +6622,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 </div>
               </div>
 
+              {!consumptionDraft.isLonche && (<>
               {/* 1. SELECCIÓN DE ATENCIÓN: MESA O TIENDA (Botones de Selección) */}
               <div>
                 <label className="text-xs font-bold uppercase tracking-wider text-stone-600 block mb-1.5">
@@ -7128,6 +6846,8 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                   </span>
                 </div>
               </div>
+
+              </>)}
 
               {/* Extras Selector: Expandable Window / Accordion with Categories */}
               <div className="rounded-2xl border border-stone-200 bg-white overflow-hidden shadow-2xs">
@@ -8457,151 +8177,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* MODAL: ESTADO DE CUENTA DETALLADO (Liquidación Mensual)                   */}
-      {/* ========================================================================= */}
-      {statementClient && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-stone-200 overflow-hidden my-auto animate-in zoom-in-95 duration-150">
-            <div className="bg-stone-900 text-white p-4 flex items-center justify-between">
-              <div>
-                <span className="text-xs text-amber-400 font-bold uppercase">
-                  Estado de Cuenta {selectedMonth}
-                </span>
-                <h3 className="font-extrabold text-base sm:text-lg">
-                  {statementClient.name} ({statementClient.piso})
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setStatementClient(null)}
-                className="text-stone-400 hover:text-white p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
-              {/* Detailed Consumptions */}
-              <div>
-                <h4 className="font-bold text-stone-800 uppercase text-[11px] mb-2">
-                  Consumos del Mes ({selectedMonth}):
-                </h4>
-                <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                  {consumptions
-                    .filter((c) => c.clientId === statementClient.id && c.date.startsWith(selectedMonth))
-                    .map((c) => (
-                      <div key={c.id} className="p-2 bg-stone-50 rounded-lg border border-stone-200 flex justify-between">
-                        <div>
-                          <div className="font-bold text-stone-900">
-                            {c.dayOfWeek} {c.date}: {c.lunches.map((l) => `${l.quantity}x ${l.menuType === 'menu_completo' ? 'Menú Completo' : 'Segundo Solo'}`).join(', ')}
-                          </div>
-                          {c.extras.length > 0 && (
-                            <div className="text-[10px] text-emerald-800">
-                              +{c.extras.map((e) => `${e.quantity} ${e.name}`).join(', ')}
-                            </div>
-                          )}
-                        </div>
-                        <span className="font-black text-amber-900">{formatCurrency(c.total)}</span>
-                      </div>
-                    ))}
-                </div>
-              </div>
-
-              {/* Detailed Payments */}
-              <div>
-                <h4 className="font-bold text-stone-800 uppercase text-[11px] mb-2">
-                  Abonos Realizados:
-                </h4>
-                <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
-                  {payments
-                    .filter((p) => p.clientId === statementClient.id && p.date.startsWith(selectedMonth))
-                    .map((p) => (
-                      <div key={p.id} className="p-2 bg-emerald-50 rounded-lg border border-emerald-200 flex justify-between items-center text-emerald-950">
-                        <div>
-                          <span className="font-bold">{p.dayOfWeek} {p.date}:</span>{' '}
-                          <span className="uppercase text-[10px] font-bold px-1 bg-white rounded border border-emerald-300">{p.method}</span>
-                        </div>
-                        <span className="font-black text-emerald-900">{formatCurrency(p.amount)}</span>
-                      </div>
-                    ))}
-                </div>
-              </div>
-
-              {/* Totals Summary */}
-              <div className="p-3 bg-stone-100 rounded-xl space-y-1 text-xs">
-                {(() => {
-                  const totalC = consumptions
-                    .filter((c) => c.clientId === statementClient.id && c.date.startsWith(selectedMonth))
-                    .reduce((s, c) => s + c.total, 0);
-                  const totalP = payments
-                    .filter((p) => p.clientId === statementClient.id && p.date.startsWith(selectedMonth))
-                    .reduce((s, p) => s + p.amount, 0);
-                  const balance = totalC - totalP;
-                  return (
-                    <>
-                      <div className="flex justify-between text-stone-600">
-                        <span>Total Consumos:</span>
-                        <span className="font-bold">{formatCurrency(totalC)}</span>
-                      </div>
-                      <div className="flex justify-between text-emerald-800">
-                        <span>Total Abonos Realizados:</span>
-                        <span className="font-bold">{formatCurrency(totalP)}</span>
-                      </div>
-                      <div className="flex justify-between text-base font-black pt-2 border-t border-stone-300 text-stone-900">
-                        <span>Saldo Pendiente de Cobro:</span>
-                        <span className={balance > 0 ? 'text-rose-700' : 'text-emerald-700'}>
-                          {formatCurrency(Math.max(0, balance))}
-                        </span>
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-
-              {/* Actions */}
-              <div className="grid grid-cols-2 gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleOpenPaymentModal(statementClient);
-                    setStatementClient(null);
-                  }}
-                  className="py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-center transition-colors"
-                >
-                  + Registrar Abono
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleSendWhatsApp(statementClient, selectedMonth)}
-                  className="py-2.5 bg-stone-900 hover:bg-black text-white font-bold rounded-xl flex items-center justify-center gap-1.5 transition-colors"
-                  title="Enviar por WhatsApp (+51)"
-                >
-                  <Share2 className="w-4 h-4 text-emerald-400" />
-                  <span>Enviar x WhatsApp</span>
-                </button>
-              </div>
-
-              {/* Botón Reversa a Cuenta Diaria */}
-              <button
-                type="button"
-                onClick={() => {
-                  const cl = statementClient;
-                  setStatementClient(null);
-                  handleOpenTransformWeeklyToDaily(cl);
-                }}
-                className="w-full mt-2 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
-                title="Revertir y cambiar este cliente a Cuenta Diaria"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-amber-800" />
-                <span>Revertir a Cuenta Diaria</span>
-              </button>
-            </div>
           </div>
         </div>
       )}

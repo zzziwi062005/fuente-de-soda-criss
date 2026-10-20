@@ -132,6 +132,7 @@ export function parseBackup(jsonStr: string, fallbackExtras: ExtraItem[] = []): 
         paymentDate: item.paymentDate ? String(item.paymentDate) : undefined,
         accountType: item.accountType === 'semanal' ? 'semanal' : 'diaria',
         notes: item.notes || undefined,
+        lonche: item.lonche && typeof item.lonche === 'object' ? item.lonche : undefined,
       }));
     }
 

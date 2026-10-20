@@ -22,6 +22,8 @@ import {
   ExtraItem,
   ExtraCategory,
   DayOfWeek,
+  LoncheInfo,
+  LoncheStatus,
   WORK_DAYS,
 } from '../types';
 import { INITIAL_EXTRAS } from '../data/initialData';
@@ -80,6 +82,18 @@ const toConsumptionMethod = (v: unknown): 'efectivo' | 'yape' | 'abono' | null =
  * Unifica variantes conocidas ('bebida' -> 'Bebidas', 'especial' -> 'Especial'…).
  * Categorías que no están en ExtraCategory (p. ej. 'postre', 'guarnicion') se conservan tal cual.
  */
+/** Normaliza la info de lonche (columna jsonb `lonche`); null si el pedido no es un lonche. */
+const toLonche = (v: unknown): LoncheInfo | null => {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const status: LoncheStatus =
+    o.status === 'preparado' || o.status === 'listo' ? o.status : 'anotado';
+  const out: LoncheInfo = { status };
+  if (typeof o.preparedAt === 'string' && o.preparedAt) out.preparedAt = o.preparedAt;
+  if (typeof o.readyAt === 'string' && o.readyAt) out.readyAt = o.readyAt;
+  return out;
+};
+
 const toCategory = (v: unknown): string | null => {
   if (v === undefined || v === null || String(v).trim() === '') return null;
   if (EXTRA_CATEGORIES.includes(v as ExtraCategory)) return v as ExtraCategory;
@@ -180,6 +194,7 @@ const consumptionsDef: TableDef<ConsumptionRecord> = {
       payment_method: toConsumptionMethod(c.paymentMethod),
       payment_date: toOptionalDate(c.paymentDate),
       notes: nullable(c.notes),
+      lonche: toLonche(c.lonche),
     };
   },
   fromRow: (r) => ({
@@ -198,6 +213,7 @@ const consumptionsDef: TableDef<ConsumptionRecord> = {
     paymentMethod: optional(r.payment_method),
     paymentDate: optional(r.payment_date),
     notes: optional(r.notes),
+    lonche: toLonche(r.lonche) ?? undefined,
   }),
 };
 

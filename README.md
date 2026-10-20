@@ -11,7 +11,9 @@ Varias personas pueden usarla a la vez desde el celular o la computadora: **cada
 ## ✨ Funcionalidades
 
 - **Registro de pedidos** por cliente y piso (Calle, 1ro–4to), con menú completo o solo segundo y adicionales del catálogo.
-- **Cuentas diarias y semanales**: saldo por cobrar, abonos parciales, marcar como pagado (efectivo / Yape).
+- **Cuentas diarias y semanales**: saldo por cobrar, abonos parciales, marcar como pagado (efectivo / Yape). Un pedido va siempre a la cuenta que tiene el cliente.
+- **Lonches**: tablero de la tarde con tres fases (anotado → preparado → listo) y la hora de cada paso; el pedido se suma a la cuenta del cliente y los listos se separan en cobrados / no cobrados.
+- **Estado de cuenta por WhatsApp**: máximo 2 semanas detalladas (lunes a sábado), lo anterior resumido en "cuenta pasada".
 - **Mesa del salón**: contador de menús y extras del día, con cuadre efectivo vs. Yape.
 - **Directorio de clientes**: alta, edición, fusión de duplicados y eliminación.
 - **Catálogo de adicionales** editable (bebidas, panes, dulces…).
@@ -63,7 +65,7 @@ Los componentes siguen trabajando con arreglos completos (`saveConsumptions(todo
 | Tabla | Entidad (`src/types.ts`) | Notas |
 |---|---|---|
 | `clients` | `ClientRecord` | cuenta `semanal` / `diaria` |
-| `consumptions` | `ConsumptionRecord` | FK → `clients`; almuerzos y extras como JSONB (foto del precio al momento de la venta) |
+| `consumptions` | `ConsumptionRecord` | FK → `clients`; almuerzos y extras como JSONB (foto del precio al momento de la venta); `lonche` JSONB con la fase y sus horas |
 | `payments` | `PaymentRecord` | abonos, FK → `clients` |
 | `mesa_records` | `MesaCounterRecord` | un registro por día (`UNIQUE(date)`) |
 | `extras` | `ExtraItem` | catálogo de adicionales |
@@ -102,12 +104,12 @@ En Supabase:
 
 ```
 src/
-├── components/          UI (CuadernoLedger, Navbar, modales) + AuthGate (login)
+├── components/          UI (CuadernoLedger, LonchesBoard, Navbar, modales) + AuthGate (login)
 ├── db/
 │   ├── database.ts      dbService: mapeo, diff, cola, tiempo real
 │   └── backupParser.ts  lectura/normalización de respaldos JSON
 ├── lib/supabase.ts      cliente de Supabase
-├── utils/               fechas, precios, teléfonos, exportación ZIP
+├── utils/               fechas, precios, teléfonos, estado de cuenta, exportación ZIP
 ├── data/                catálogo inicial y datos de demostración
 └── types.ts             modelo de dominio
 supabase/

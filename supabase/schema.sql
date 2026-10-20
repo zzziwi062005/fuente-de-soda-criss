@@ -72,9 +72,17 @@ create table if not exists public.consumptions (
   payment_method  text          check (payment_method in ('efectivo', 'yape', 'abono')),  -- 'abono' = liquidado con abonos previos
   payment_date    date,
   notes           text,
+  lonche          jsonb         check (lonche is null or jsonb_typeof(lonche) = 'object'),
+                                -- LoncheInfo {status, preparedAt?, readyAt?}; NULL = no es lonche
   created_at      timestamptz   not null default now(),
   updated_at      timestamptz   not null default now()
 );
+
+-- Bases creadas con una versión anterior: columna para el seguimiento de lonches
+alter table public.consumptions add column if not exists lonche jsonb;
+alter table public.consumptions drop constraint if exists consumptions_lonche_check;
+alter table public.consumptions add constraint consumptions_lonche_check
+  check (lonche is null or jsonb_typeof(lonche) = 'object');
 
 -- Bases creadas con una versión anterior: permitir 'abono' como método de cobro del pedido
 alter table public.consumptions drop constraint if exists consumptions_payment_method_check;
@@ -205,10 +213,10 @@ begin
 
   insert into public.consumptions (id, client_id, client_name, piso, account_type, date, day_of_week,
                                    recorded_at, lunches, extras, total, payment_status, payment_method,
-                                   payment_date, notes)
+                                   payment_date, notes, lonche)
   select id, client_id, client_name, piso, account_type, date, day_of_week,
          coalesce(recorded_at, now()), coalesce(lunches, '[]'::jsonb), coalesce(extras, '[]'::jsonb),
-         coalesce(total, 0), coalesce(payment_status, 'pendiente'), payment_method, payment_date, notes
+         coalesce(total, 0), coalesce(payment_status, 'pendiente'), payment_method, payment_date, notes, lonche
   from jsonb_populate_recordset(null::public.consumptions, coalesce(payload->'consumptions', '[]'::jsonb));
 
   insert into public.payments (id, client_id, client_name, piso, account_type, date, day_of_week,
