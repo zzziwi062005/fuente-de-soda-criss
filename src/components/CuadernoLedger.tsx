@@ -68,7 +68,8 @@ import {
   Filter,
   Coins,
   GitMerge,
-  Sandwich
+  Sandwich,
+  QrCode
 } from 'lucide-react';
 
 export const EXTRA_CATEGORIES: ExtraCategory[] = ['Bebidas', 'Panes', 'Extras', 'Especial', 'Dulces'];
@@ -356,6 +357,8 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
   // Modal: Gestionar Adicionales
   const [showManageExtrasModal, setShowManageExtrasModal] = useState<boolean>(false);
+  // QR de Yape para mostrarlo al cliente al cobrar
+  const [showYapeQr, setShowYapeQr] = useState<boolean>(false);
   // Catálogo: filtro por tipo, búsqueda y modo "combinar" (el primero elegido es el principal)
   const [catalogCategoryFilter, setCatalogCategoryFilter] = useState<ExtraCategory | 'Todos'>('Todos');
   const [catalogSearch, setCatalogSearch] = useState<string>('');
@@ -3941,6 +3944,42 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
               <UserPlus className="w-3.5 h-3.5" />
               <span>+ Cliente</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setShowYapeQr(true)}
+              className="px-3.5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-xs"
+              title="Mostrar el QR de Yape para que el cliente pague"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>QR Yape</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Ventana con el QR de Yape (para que el cliente lo escanee al pagar) */}
+      {showYapeQr && (
+        <div
+          className="fixed inset-0 z-[70] bg-black/75 backdrop-blur-xs flex items-center justify-center p-3"
+          onClick={() => setShowYapeQr(false)}
+          role="dialog"
+          aria-label="QR de Yape"
+        >
+          <div className="relative max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setShowYapeQr(false)}
+              className="absolute top-2 right-2 z-10 w-9 h-9 rounded-full bg-white text-stone-800 shadow-md flex items-center justify-center hover:bg-stone-100"
+              title="Cerrar"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img
+              src="/yape-qr.png"
+              alt="Código QR de Yape para pagar"
+              className="w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl"
+            />
           </div>
         </div>
       )}
