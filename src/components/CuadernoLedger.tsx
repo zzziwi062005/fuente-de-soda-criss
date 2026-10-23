@@ -356,6 +356,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
   // Modal: Gestionar Adicionales
   const [showManageExtrasModal, setShowManageExtrasModal] = useState<boolean>(false);
+  // Catálogo: filtro por tipo, búsqueda y modo "combinar" (el primero elegido es el principal)
+  const [catalogCategoryFilter, setCatalogCategoryFilter] = useState<ExtraCategory | 'Todos'>('Todos');
+  const [catalogSearch, setCatalogSearch] = useState<string>('');
+  const [isExtrasMergeMode, setIsExtrasMergeMode] = useState<boolean>(false);
+  const [extrasMergeSelection, setExtrasMergeSelection] = useState<string[]>([]);
   const [newExtraName, setNewExtraName] = useState<string>('');
   const [newExtraPrice, setNewExtraPrice] = useState<string>('');
   const [newExtraCategory, setNewExtraCategory] = useState<ExtraCategory>('Bebidas');
@@ -916,20 +921,31 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       );
       const totalPaid = clientPayments.reduce((s, p) => s + p.amount, 0);
 
-      // Abonos ya utilizados para liquidar pedidos (pedidos cobrados con método 'abono') en el periodo
-      const consumedByAbono = consumptions
-        .filter(
-          (c) =>
-            c.accountType === 'diaria' &&
-            c.paymentStatus === 'pagado' &&
-            (c.paymentMethod as string) === 'abono' &&
-            !!c.paymentDate &&
-            c.paymentDate >= accountStart &&
-            c.paymentDate <= selectedDate &&
-            belongsToClient(c.clientId, c.clientName)
-        )
-        .reduce((s, c) => s + c.total, 0);
-      const openAbono = roundMoney(Math.max(0, totalPaid - consumedByAbono));
+      // Pedidos liquidados con abonos (método 'abono') dentro del periodo
+      const abonoUses = consumptions.filter(
+        (c) =>
+          c.accountType === 'diaria' &&
+          c.paymentStatus === 'pagado' &&
+          (c.paymentMethod as string) === 'abono' &&
+          !!c.paymentDate &&
+          c.paymentDate >= accountStart &&
+          c.paymentDate <= selectedDate &&
+          belongsToClient(c.clientId, c.clientName)
+      );
+
+      // Abono disponible: se recorre el periodo día por día; cada día primero entran los abonos
+      // y luego se descuentan los pedidos liquidados con abonos, sin bajar de 0. Así un pedido
+      // que se pagó con un abono ANTERIOR al periodo no se "come" un abono nuevo (antes se
+      // restaba todo junto y el abono nuevo no rebajaba la cuenta).
+      const abonoDays = Array.from(
+        new Set([...clientPayments.map((p) => p.date), ...abonoUses.map((c) => c.paymentDate as string)])
+      ).sort();
+      let openAbono = 0;
+      abonoDays.forEach((day) => {
+        const added = clientPayments.filter((p) => p.date === day).reduce((s, p) => s + p.amount, 0);
+        const used = abonoUses.filter((c) => c.paymentDate === day).reduce((s, c) => s + c.total, 0);
+        openAbono = roundMoney(Math.max(0, openAbono + added - used));
+      });
 
       const allMarkedPaid = sortedCons.length > 0 && sortedCons.every((c) => c.paymentStatus === 'pagado');
       let saldoPendiente = 0;
@@ -3377,6 +3393,114 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     if (onSaveExtras) {
       onSaveExtras(updated);
     }
+  };
+
+  // Catálogo ordenado por tipo y nombre, con filtro por tipo y búsqueda
+  const catalogCategoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { Todos: extrasCatalog.length };
+    extrasCatalog.forEach((ex) => {
+      const cat = normalizeExtraCategory(ex.category);
+      counts[cat] = (counts[cat] || 0) + 1;
+    });
+    return counts;
+  }, [extrasCatalog]);
+
+  const visibleCatalog = useMemo(() => {
+    const term = normalizeClientName(catalogSearch);
+    return extrasCatalog
+      .filter((ex) => catalogCategoryFilter === 'Todos' || normalizeExtraCategory(ex.category) === catalogCategoryFilter)
+      .filter((ex) => !term || normalizeClientName(ex.name).includes(term))
+      .sort(
+        (a, b) =>
+          EXTRA_CATEGORIES.indexOf(normalizeExtraCategory(a.category)) -
+            EXTRA_CATEGORIES.indexOf(normalizeExtraCategory(b.category)) || a.name.localeCompare(b.name)
+      );
+  }, [extrasCatalog, catalogCategoryFilter, catalogSearch]);
+
+  const handleToggleExtraForMerge = (extraId: string) => {
+    setExtrasMergeSelection((prev) =>
+      prev.includes(extraId) ? prev.filter((id) => id !== extraId) : [...prev, extraId]
+    );
+  };
+
+  /**
+   * Combina adicionales: el principal toma el lugar de los demás en el catálogo, en los
+   * pedidos y en la mesa (cambia nombre e id). Nunca cambia precios ni totales, así que lo
+   * ya cobrado queda igual. Solo en pedidos pendientes se juntan en una línea los que quedan
+   * repetidos con el mismo precio; en los pedidos ya cobrados no se suma nada.
+   */
+  const handleMergeExtras = (mainId: string, secondaryIds: string[]) => {
+    const main = extrasCatalog.find((ex) => ex.id === mainId);
+    const secondaries = extrasCatalog.filter((ex) => secondaryIds.includes(ex.id));
+    if (!main || secondaries.length === 0) return;
+
+    const secIds = new Set(secondaries.map((ex) => ex.id));
+    const secNames = new Set(secondaries.map((ex) => normalizeClientName(ex.name)));
+    const isSecondary = (line: OrderExtraItem) =>
+      line.extraId ? secIds.has(line.extraId) : secNames.has(normalizeClientName(line.name));
+
+    const renameLines = (lines: OrderExtraItem[], combine: boolean): OrderExtraItem[] | null => {
+      if (!lines.some(isSecondary)) return null;
+      const renamed = lines.map((line) =>
+        isSecondary(line) ? { ...line, extraId: main.id, name: main.name, description: main.description } : line
+      );
+      if (!combine) return renamed;
+      const out: OrderExtraItem[] = [];
+      renamed.forEach((line) => {
+        const twin = out.find((o) => o.extraId === main.id && line.extraId === main.id && o.price === line.price);
+        if (twin) {
+          twin.quantity += line.quantity;
+          twin.totalPrice = roundMoney(twin.totalPrice + line.totalPrice);
+        } else {
+          out.push({ ...line });
+        }
+      });
+      return out;
+    };
+
+    let changedOrders = 0;
+    const updatedConsumptions = consumptions.map((c) => {
+      const extras = renameLines(c.extras, c.paymentStatus === 'pendiente');
+      if (!extras) return c;
+      changedOrders += 1;
+      return { ...c, extras };
+    });
+
+    let changedMesa = 0;
+    const updatedMesa = mesaRecords.map((m) => {
+      const extras = renameLines(m.extras, false);
+      if (!extras) return m;
+      changedMesa += 1;
+      return { ...m, extras };
+    });
+
+    if (changedOrders > 0) onSaveConsumptions(updatedConsumptions);
+    if (changedMesa > 0) onSaveMesaRecords(updatedMesa);
+    if (onSaveExtras) onSaveExtras(extrasCatalog.filter((ex) => !secIds.has(ex.id)));
+
+    setExtrasMergeSelection([]);
+    setIsExtrasMergeMode(false);
+  };
+
+  const handleAskMergeExtras = () => {
+    const [mainId, ...secondaryIds] = extrasMergeSelection;
+    const main = extrasCatalog.find((ex) => ex.id === mainId);
+    const secondaries = extrasCatalog.filter((ex) => secondaryIds.includes(ex.id));
+    if (!main || secondaries.length === 0) return;
+    const secIds = new Set(secondaries.map((ex) => ex.id));
+    const secNames = new Set(secondaries.map((ex) => normalizeClientName(ex.name)));
+    const uses = consumptions.filter((c) =>
+      c.extras.some((line) => (line.extraId ? secIds.has(line.extraId) : secNames.has(normalizeClientName(line.name))))
+    ).length;
+    setConfirmModal({
+      isOpen: true,
+      title: '¿Combinar adicionales?',
+      message: `"${secondaries.map((ex) => ex.name).join('", "')}" se reemplazará por "${main.name}".`,
+      detail: `Se actualizarán ${uses} pedido(s) que los usan. Los precios y totales no cambian: lo ya cobrado queda igual.`,
+      confirmLabel: 'Sí, combinar',
+      cancelLabel: 'Cancelar',
+      onConfirm: () => handleMergeExtras(mainId, secondaryIds),
+    });
   };
 
   // Client Management Handlers
@@ -8267,54 +8391,133 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 </div>
               </form>
 
-              {/* Lista de Adicionales Configurados */}
+              {/* Lista de Adicionales Configurados: filtro por tipo, búsqueda y combinar */}
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-black uppercase text-stone-700">
                     Productos Registrados ({extrasCatalog.length}):
                   </span>
-                  <span className="text-[11px] text-stone-500">
-                    Disponibles para pedidos y mesa
-                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExtrasMergeMode(!isExtrasMergeMode);
+                      setExtrasMergeSelection([]);
+                    }}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 border transition-colors ${
+                      isExtrasMergeMode
+                        ? 'bg-indigo-700 text-white border-indigo-800'
+                        : 'bg-indigo-50 text-indigo-900 border-indigo-200 hover:bg-indigo-100'
+                    }`}
+                    title="Unir adicionales repetidos en uno principal"
+                  >
+                    <GitMerge className="w-3.5 h-3.5" />
+                    <span>{isExtrasMergeMode ? 'Cancelar Combinar' : 'Combinar'}</span>
+                  </button>
                 </div>
 
+                {/* Filtro por tipo */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(['Todos', ...EXTRA_CATEGORIES] as const).map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setCatalogCategoryFilter(cat)}
+                      className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                        catalogCategoryFilter === cat
+                          ? 'bg-amber-800 text-white border-amber-900'
+                          : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                    >
+                      {cat === 'Todos' ? 'Todos' : `${getCategoryIcon(cat)} ${cat}`} ({catalogCategoryCounts[cat] || 0})
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-stone-400" />
+                  <input
+                    type="text"
+                    value={catalogSearch}
+                    onChange={(e) => setCatalogSearch(e.target.value)}
+                    placeholder="Buscar adicional..."
+                    className="w-full text-xs pl-8 pr-3 py-1.5 border border-stone-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  />
+                </div>
+
+                {isExtrasMergeMode && (
+                  <div className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-200 text-[11px] text-indigo-950 space-y-2">
+                    <p>
+                      Toca primero el adicional <strong>principal</strong> y luego los que quieres unir a él. El principal
+                      toma su lugar en los pedidos; los precios y lo ya cobrado no cambian.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={extrasMergeSelection.length < 2}
+                      onClick={handleAskMergeExtras}
+                      className="w-full py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 disabled:bg-stone-300 disabled:text-stone-500 text-white font-bold text-xs"
+                    >
+                      Combinar {extrasMergeSelection.length > 1 ? `${extrasMergeSelection.length - 1} en el principal` : '(elige al menos 2)'}
+                    </button>
+                  </div>
+                )}
+
                 <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl overflow-hidden bg-white">
-                  {extrasCatalog.length === 0 ? (
+                  {visibleCatalog.length === 0 ? (
                     <div className="p-4 text-center text-xs text-stone-400">
-                      No hay productos adicionales registrados en el catálogo.
+                      {extrasCatalog.length === 0
+                        ? 'No hay productos adicionales registrados en el catálogo.'
+                        : 'No hay adicionales de este tipo.'}
                     </div>
                   ) : (
-                    extrasCatalog.map((extra) => (
-                      <div key={extra.id} className="p-2.5 flex items-center justify-between hover:bg-stone-50 transition-colors">
-                        <div className="flex items-center gap-2.5">
-                          <span className="text-base">
-                            {getCategoryIcon(extra.category)}
-                          </span>
-                          <div>
-                            <span className="font-extrabold text-xs text-stone-900 block">
-                              {extra.name}
-                            </span>
-                            <span className="text-[10px] font-bold text-stone-500 uppercase">
-                              {normalizeExtraCategory(extra.category)}
-                            </span>
+                    visibleCatalog.map((extra) => {
+                      const selIndex = extrasMergeSelection.indexOf(extra.id);
+                      return (
+                        <div
+                          key={extra.id}
+                          data-extra={extra.name}
+                          onClick={isExtrasMergeMode ? () => handleToggleExtraForMerge(extra.id) : undefined}
+                          className={`p-2.5 flex items-center justify-between transition-colors ${
+                            isExtrasMergeMode ? 'cursor-pointer' : ''
+                          } ${
+                            selIndex === 0
+                              ? 'bg-indigo-100'
+                              : selIndex > 0
+                              ? 'bg-indigo-50'
+                              : 'hover:bg-stone-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span className="text-base">{getCategoryIcon(extra.category)}</span>
+                            <div>
+                              <span className="font-extrabold text-xs text-stone-900 block">{extra.name}</span>
+                              <span className="text-[10px] font-bold text-stone-500 uppercase">
+                                {normalizeExtraCategory(extra.category)}
+                              </span>
+                            </div>
+                            {selIndex === 0 && (
+                              <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-700 text-white">Principal</span>
+                            )}
+                            {selIndex > 0 && (
+                              <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-200 text-indigo-950">Se une</span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <span className="font-black text-sm text-stone-900">{formatCurrency(extra.price)}</span>
+                            {!isExtrasMergeMode && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteExtra(extra.id)}
+                                className="p-1 text-stone-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors"
+                                title="Eliminar este producto del catálogo"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
-
-                        <div className="flex items-center gap-3">
-                          <span className="font-black text-sm text-stone-900">
-                            {formatCurrency(extra.price)}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteExtra(extra.id)}
-                            className="p-1 text-stone-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors"
-                            title="Eliminar este producto del catálogo"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>

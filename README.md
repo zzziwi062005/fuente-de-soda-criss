@@ -16,7 +16,7 @@ Varias personas pueden usarla a la vez desde el celular o la computadora: **cada
 - **Estado de cuenta por WhatsApp**: máximo 2 semanas detalladas (lunes a sábado), lo anterior resumido en "cuenta pasada".
 - **Mesa del salón**: contador de menús y extras del día, con cuadre efectivo vs. Yape.
 - **Directorio de clientes**: alta, edición, fusión de duplicados y eliminación.
-- **Catálogo de adicionales** editable (bebidas, panes, dulces…).
+- **Catálogo de adicionales** editable (bebidas, panes, dulces…), con filtro por tipo y opción para combinar duplicados sin alterar montos ya cobrados.
 - **Respaldo**: descarga ZIP (Excel/CSV + JSON) y restauración completa.
 - **Multiusuario en tiempo real** con inicio de sesión.
 
