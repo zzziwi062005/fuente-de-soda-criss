@@ -91,6 +91,17 @@ export function getCategoryIcon(cat?: string): string {
   return '🍳';
 }
 
+/**
+ * Búsqueda de adicionales: el espacio separa búsquedas ("coca huevo" muestra las cocas y los
+ * huevos). Sin tildes ni mayúsculas. Las listas siguen ordenadas por precio.
+ */
+export function matchesExtraSearch(name: string, query: string): boolean {
+  const terms = normalizeClientName(query).split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const target = normalizeClientName(name);
+  return terms.some((term) => target.includes(term));
+}
+
 export function normalizeExtraCategory(cat?: string): ExtraCategory {
   if (!cat) return 'Extras';
   const c = cat.toLowerCase();
@@ -623,8 +634,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         const matchesCategory =
           selectedExtraCategoryFilter === 'Todos' || normCategory === selectedExtraCategoryFilter;
         const matchesSearch =
-          !extraSearchQuery.trim() ||
-          extra.name.toLowerCase().includes(extraSearchQuery.trim().toLowerCase());
+          matchesExtraSearch(extra.name, extraSearchQuery);
         return matchesCategory && matchesSearch;
       })
       .sort((a, b) => a.price - b.price);
@@ -639,8 +649,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           const normCategory = normalizeExtraCategory(extra.category);
           const matchesCategory = normCategory === cat;
           const matchesSearch =
-            !extraSearchQuery.trim() ||
-            extra.name.toLowerCase().includes(extraSearchQuery.trim().toLowerCase());
+            matchesExtraSearch(extra.name, extraSearchQuery);
           return matchesCategory && matchesSearch;
         })
         .sort((a, b) => a.price - b.price);
@@ -659,8 +668,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         const matchesCategory =
           addProdExtraCategoryFilter === 'Todos' || normCategory === addProdExtraCategoryFilter;
         const matchesSearch =
-          !addProdExtraSearch.trim() ||
-          extra.name.toLowerCase().includes(addProdExtraSearch.trim().toLowerCase());
+          matchesExtraSearch(extra.name, addProdExtraSearch);
         return matchesCategory && matchesSearch;
       })
       .sort((a, b) => a.price - b.price);
@@ -3467,10 +3475,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   }, [extrasCatalog]);
 
   const visibleCatalog = useMemo(() => {
-    const term = normalizeClientName(catalogSearch);
     return extrasCatalog
       .filter((ex) => catalogCategoryFilter === 'Todos' || normalizeExtraCategory(ex.category) === catalogCategoryFilter)
-      .filter((ex) => !term || normalizeClientName(ex.name).includes(term))
+      .filter((ex) => matchesExtraSearch(ex.name, catalogSearch))
       .sort(
         (a, b) =>
           EXTRA_CATEGORIES.indexOf(normalizeExtraCategory(a.category)) -
