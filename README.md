@@ -11,7 +11,7 @@ Varias personas pueden usarla a la vez desde el celular o la computadora: **cada
 ## ✨ Funcionalidades
 
 - **Registro de pedidos** por cliente y piso (Calle, 1ro–4to), con menú completo o solo segundo y adicionales del catálogo.
-- **Cuentas diarias y semanales**: saldo por cobrar, abonos parciales, marcar como pagado (efectivo / Yape). Un pedido va siempre a la cuenta que tiene el cliente.
+- **Cuentas diarias y semanales**: saldo por cobrar, abonos parciales, marcar como pagado (efectivo / Yape). Un pedido va siempre a la cuenta que tiene el cliente. En las semanales, cobrar un día, pedido o producto registra su abono, y los pedidos cubiertos por abonos se pintan de verde (`src/utils/weeklyLedger.ts`).
 - **Lonches**: tablero de la tarde con tres fases (anotado → preparado → listo) y la hora de cada paso; el pedido se suma a la cuenta del cliente y los listos se separan en cobrados / no cobrados.
 - **Estado de cuenta por WhatsApp**: máximo 2 semanas detalladas (lunes a sábado), lo anterior resumido en "cuenta pasada".
 - **Mesa del salón**: contador de menús y extras del día, con cuadre efectivo vs. Yape.

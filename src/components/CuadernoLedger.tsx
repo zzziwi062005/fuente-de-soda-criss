@@ -21,6 +21,13 @@ import {
 } from '../types';
 import { formatCurrency } from '../utils/pricing';
 import { buildWeeklyStatement } from '../utils/whatsappStatement';
+import {
+  buildWeeklyLedger,
+  WeeklyLedger,
+  isDirectlyPaid,
+  linkedConsumptionId,
+  linkedPaymentId,
+} from '../utils/weeklyLedger';
 import { getDayOfWeekName, getTodayDateString } from '../db/database';
 import { formatPhoneForWhatsApp, formatPhoneDisplay } from '../utils/phone';
 import { ClientsDirectoryModal } from './ClientsDirectoryModal';
@@ -1350,29 +1357,48 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   }, [mesaRecords, consumptions, payments, today, currentYearMonth]);
 
   // Estadísticas globales de deuda: cuánto falta cobrar en cuentas diarias y semanales
+  // Libro de cada cliente semanal: deuda = pedidos − abonos; cada abono se reparte entre los
+  // pedidos (el pago de un día/pedido cubre ese pedido; los demás, del más antiguo al más nuevo)
+  const weeklyLedgers = useMemo(() => {
+    const weeklyIds = new Set<string>(clients.filter((c) => c.accountType === 'semanal').map((c) => c.id));
+    const consBy = new Map<string, ConsumptionRecord[]>();
+    consumptions.forEach((c) => {
+      if (!weeklyIds.has(c.clientId)) return;
+      const list = consBy.get(c.clientId) || [];
+      list.push(c);
+      consBy.set(c.clientId, list);
+    });
+    const paysBy = new Map<string, PaymentRecord[]>();
+    payments.forEach((p) => {
+      if (!weeklyIds.has(p.clientId)) return;
+      const list = paysBy.get(p.clientId) || [];
+      list.push(p);
+      paysBy.set(p.clientId, list);
+    });
+    const map = new Map<string, WeeklyLedger>();
+    weeklyIds.forEach((id) => map.set(id, buildWeeklyLedger(consBy.get(id) || [], paysBy.get(id) || [])));
+    return map;
+  }, [clients, consumptions, payments]);
+
+  const weeklyDebtOf = (clientId: string): number => weeklyLedgers.get(clientId)?.debt ?? 0;
+
+  /** Lo que falta pagar de un pedido semanal (descontando abonos). */
+  const weeklyRemainingOf = (cons: ConsumptionRecord): number => {
+    const cov = weeklyLedgers.get(cons.clientId)?.coverage.get(cons.id);
+    if (cov) return cov.remaining;
+    return isDirectlyPaid(cons) ? 0 : cons.total;
+  };
+
   const globalDebtStats = useMemo(() => {
     // 1. Deuda en cuentas diarias (de la fecha actual y arrastradas pendientes)
     const dailyDebt = dailyAccountsList.reduce((sum, acc) => sum + (acc.isFullyPaid ? 0 : acc.saldoPendiente), 0);
 
-    // 2. Deuda en cuentas semanales
+    // 2. Deuda en cuentas semanales (pedidos − abonos de cada cliente semanal)
     let weeklyDebt = 0;
-    clients
-      .filter((c) => c.accountType === 'semanal')
-      .forEach((c) => {
-        const clientCons = consumptions.filter(
-          (item) =>
-            item.accountType === 'semanal' &&
-            (item.clientId === c.id || item.clientName.trim().toLowerCase() === c.name.trim().toLowerCase())
-        );
-        const totalCons = clientCons.reduce((s, item) => s + item.total, 0);
-        const clientPays = payments.filter(
-          (p) =>
-            p.clientId === c.id || p.clientName.trim().toLowerCase() === c.name.trim().toLowerCase()
-        );
-        const totalPays = clientPays.reduce((s, p) => s + p.amount, 0);
-        const pending = Math.max(0, totalCons - totalPays);
-        weeklyDebt += pending;
-      });
+    weeklyLedgers.forEach((ledger) => {
+      weeklyDebt += ledger.debt;
+    });
+    weeklyDebt = roundMoney(weeklyDebt);
 
     const totalDebt = dailyDebt + weeklyDebt;
     return {
@@ -1380,7 +1406,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       weeklyDebt,
       totalDebt,
     };
-  }, [dailyAccountsList, clients, consumptions, payments]);
+  }, [dailyAccountsList, weeklyLedgers]);
 
   // Búsqueda inteligente de clientes en tiempo real para asignación de pedidos
   const matchingClientsForOrder = useMemo(() => {
@@ -1832,6 +1858,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       isDestructive: true,
       onConfirm: () => {
         onSaveConsumptions(consumptions.filter((c) => c.id !== id));
+        // Si el pedido semanal tenía su propio pago, ese abono también se quita
+        if (payments.some((p) => linkedConsumptionId(p.id) === id)) {
+          onSavePayments(payments.filter((p) => linkedConsumptionId(p.id) !== id));
+        }
       },
     });
   };
@@ -1853,6 +1883,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         onSaveConsumptions(
           consumptions.filter((c) => !(c.clientId === clientId && c.date === dateStr))
         );
+        const dayIds = new Set(dayCons.map((c) => c.id));
+        if (payments.some((p) => dayIds.has(linkedConsumptionId(p.id) || ''))) {
+          onSavePayments(payments.filter((p) => !dayIds.has(linkedConsumptionId(p.id) || '')));
+        }
       },
     });
   };
@@ -1928,6 +1962,15 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       isDestructive: true,
       onConfirm: () => {
         onSavePayments(payments.filter((p) => p.id !== id));
+        // Si era el pago de un pedido semanal, ese pedido vuelve a pendiente
+        const consId = linkedConsumptionId(id);
+        if (consId && consumptions.some((c) => c.id === consId && c.paymentStatus === 'pagado')) {
+          onSaveConsumptions(
+            consumptions.map((c) =>
+              c.id === consId ? { ...c, paymentStatus: 'pendiente' as const, paymentMethod: undefined, paymentDate: undefined } : c
+            )
+          );
+        }
       },
     });
   };
@@ -2424,53 +2467,80 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   };
 
   // Cobrar todos los pedidos de un día específico en una cuenta semanal
+  // ---------------------------------------------------------------------------------------
+  // Cobros en cuentas semanales: cada cobro (día, pedido o producto) se registra como ABONO
+  // (aparece en "Abonos de esta semana", en la caja y en el estado de cuenta) y el pedido
+  // queda marcado con método 'abono' para no contarse dos veces.
+  // ---------------------------------------------------------------------------------------
+  const payWeeklyOrders = (client: ClientRecord, orders: ConsumptionRecord[], method: PaymentMethod) => {
+    const stamp = Date.now();
+    const nowIso = new Date().toISOString();
+    const newPayments: PaymentRecord[] = [];
+    const paidIds = new Set<string>();
+    orders.forEach((cons, idx) => {
+      const amount = roundMoney(weeklyRemainingOf(cons));
+      if (amount <= 0) return;
+      paidIds.add(cons.id);
+      newPayments.push({
+        id: linkedPaymentId(cons.id, `${stamp}${idx}`),
+        clientId: client.id,
+        clientName: client.name,
+        piso: client.piso,
+        accountType: 'semanal',
+        date: today,
+        dayOfWeek: getDayOfWeekName(today),
+        amount,
+        method,
+        notes: `Pagó pedido del ${cons.dayOfWeek} ${cons.date.slice(8, 10)}/${cons.date.slice(5, 7)}`,
+        timestamp: nowIso,
+      });
+    });
+    if (newPayments.length === 0) return;
+    onSavePayments([...newPayments, ...payments]);
+    onSaveConsumptions(
+      consumptions.map((c) =>
+        paidIds.has(c.id)
+          ? { ...c, paymentStatus: 'pagado' as const, paymentMethod: 'abono' as const, paymentDate: today }
+          : c
+      )
+    );
+  };
+
+  /** Deshace cobros de pedidos semanales: borra su abono (si lo tiene) y vuelven a pendiente. */
+  const unpayWeeklyOrders = (orders: ConsumptionRecord[]) => {
+    const ids = new Set(orders.map((c) => c.id));
+    const linked = new Set(
+      payments
+        .filter((p) => {
+          const consId = linkedConsumptionId(p.id);
+          return !!consId && ids.has(consId);
+        })
+        .map((p) => p.id)
+    );
+    if (linked.size > 0) onSavePayments(payments.filter((p) => !linked.has(p.id)));
+    onSaveConsumptions(
+      consumptions.map((c) =>
+        ids.has(c.id) && c.paymentStatus === 'pagado'
+          ? { ...c, paymentStatus: 'pendiente' as const, paymentMethod: undefined, paymentDate: undefined }
+          : c
+      )
+    );
+  };
+
   const handlePayWeeklyDay = (
     client: ClientRecord,
     dayData: { dateStr: string; dayName: string; consumptions: ConsumptionRecord[]; total: number },
     method: PaymentMethod
   ) => {
-    const pendingCons = dayData.consumptions.filter((c) => c.paymentStatus !== 'pagado');
-    const amountToPay = pendingCons.reduce((s, c) => s + c.total, 0);
-    if (amountToPay <= 0) return;
-
-    const paymentDate = selectedDate || today;
-
-    const pendingIds = new Set(pendingCons.map((c) => c.id));
-    const updatedCons = consumptions.map((c) => {
-      if (pendingIds.has(c.id)) {
-        return {
-          ...c,
-          paymentStatus: 'pagado' as const,
-          paymentMethod: method,
-          paymentDate: paymentDate,
-        };
-      }
-      return c;
-    });
-
-    onSaveConsumptions(updatedCons);
+    payWeeklyOrders(client, dayData.consumptions, method);
   };
 
   // Revertir pago de un día específico en una cuenta semanal
   const handleRevertWeeklyDay = (
-    client: ClientRecord,
+    _client: ClientRecord,
     dayData: { dateStr: string; dayName: string; consumptions: ConsumptionRecord[]; total: number }
   ) => {
-    const dayIds = new Set(dayData.consumptions.map((c) => c.id));
-
-    const updatedCons = consumptions.map((c) => {
-      if (dayIds.has(c.id)) {
-        return {
-          ...c,
-          paymentStatus: 'pendiente' as const,
-          paymentMethod: undefined,
-          paymentDate: undefined,
-        };
-      }
-      return c;
-    });
-
-    onSaveConsumptions(updatedCons);
+    unpayWeeklyOrders(dayData.consumptions);
   };
 
   // Cobrar un pedido individual dentro de un día de cuenta semanal
@@ -2479,24 +2549,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     cons: ConsumptionRecord,
     method: PaymentMethod
   ) => {
-    const paymentDate = selectedDate || today;
-
-    const updatedCons = consumptions.map((c) => {
-      if (c.id === cons.id) {
-        return {
-          ...c,
-          paymentStatus: 'pagado' as const,
-          paymentMethod: method,
-          paymentDate: paymentDate,
-        };
-      }
-      return c;
-    });
-
-    onSaveConsumptions(updatedCons);
+    payWeeklyOrders(client, [cons], method);
   };
 
-  // Revertir cobro de un pedido individual dentro de un día de cuenta semanal
   // Cobrar un lonche desde "Listos": mismo cobro que en Cuentas Diarias (aplica abonos
   // abiertos) o en Cuentas Semanales (pagado directo), según la cuenta del cliente.
   const handlePayLonche = (consumptionId: string, method: PaymentMethod) => {
@@ -2514,26 +2569,13 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     onSaveConsumptions(consumptions.map((c) => (c.id === cons.id ? settled[0] : c)));
   };
 
-  const handleRevertWeeklyConsumption = (
-    client: ClientRecord,
-    cons: ConsumptionRecord
-  ) => {
-    const updatedCons = consumptions.map((c) => {
-      if (c.id === cons.id) {
-        return {
-          ...c,
-          paymentStatus: 'pendiente' as const,
-          paymentMethod: undefined,
-          paymentDate: undefined,
-        };
-      }
-      return c;
-    });
-
-    onSaveConsumptions(updatedCons);
+  // Revertir cobro de un pedido individual dentro de un día de cuenta semanal
+  const handleRevertWeeklyConsumption = (_client: ClientRecord, cons: ConsumptionRecord) => {
+    unpayWeeklyOrders([cons]);
   };
 
-  // Cobrar un producto/extra individual dentro de un día de cuenta semanal
+  // Cobrar un producto/extra individual dentro de un día de cuenta semanal: se separa en su
+  // propio pedido (pagado con su abono) y el resto sigue pendiente.
   const handlePayWeeklyItem = (
     client: ClientRecord,
     cons: ConsumptionRecord,
@@ -2541,11 +2583,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     itemId: string,
     method: PaymentMethod
   ) => {
-    const paymentDate = selectedDate || today;
     const totalItems = cons.lunches.length + cons.extras.length;
 
     if (totalItems <= 1) {
-      handlePayWeeklyConsumption(client, cons, method);
+      payWeeklyOrders(client, [cons], method);
       return;
     }
 
@@ -2567,9 +2608,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       itemPrice = targetExtra.totalPrice;
     }
 
-    const remainingTotal =
-      remainingLunches.reduce((s, l) => s + l.totalPrice, 0) +
-      remainingExtras.reduce((s, e) => s + e.totalPrice, 0);
+    const remainingTotal = roundMoney(
+      remainingLunches.reduce((s, l) => s + l.totalPrice, 0) + remainingExtras.reduce((s, e) => s + e.totalPrice, 0)
+    );
 
     const updatedPendingCons: ConsumptionRecord = {
       ...cons,
@@ -2578,8 +2619,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       total: remainingTotal,
     };
 
+    const stamp = Date.now();
     const paidCons: ConsumptionRecord = {
-      id: `cons-${Date.now()}`,
+      id: `cons-${stamp}`,
       clientId: cons.clientId,
       clientName: cons.clientName,
       piso: cons.piso,
@@ -2591,15 +2633,27 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       extras: targetExtra ? [targetExtra] : [],
       total: itemPrice,
       paymentStatus: 'pagado' as const,
-      paymentMethod: method,
-      paymentDate: paymentDate,
+      paymentMethod: 'abono',
+      paymentDate: today,
       notes: cons.notes ? `${cons.notes} (Cobrado individual)` : undefined,
     };
 
-    onSaveConsumptions([
-      paidCons,
-      ...consumptions.map((c) => (c.id === cons.id ? updatedPendingCons : c)),
-    ]);
+    const itemPayment: PaymentRecord = {
+      id: linkedPaymentId(paidCons.id, stamp),
+      clientId: client.id,
+      clientName: client.name,
+      piso: client.piso,
+      accountType: 'semanal',
+      date: today,
+      dayOfWeek: getDayOfWeekName(today),
+      amount: itemPrice,
+      method,
+      notes: `Pagó producto del ${cons.dayOfWeek} ${cons.date.slice(8, 10)}/${cons.date.slice(5, 7)}`,
+      timestamp: new Date().toISOString(),
+    };
+
+    onSavePayments([itemPayment, ...payments]);
+    onSaveConsumptions([paidCons, ...consumptions.map((c) => (c.id === cons.id ? updatedPendingCons : c))]);
   };
 
   // Handlers para Cuentas Diarias Consolidadas (Contraer, Expandir, Agregar Producto, Modificar y Cobrar)
@@ -3110,7 +3164,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         c.clientName.trim().toLowerCase() === clientNameNorm;
 
       if (isMatch) {
-        if (c.paymentStatus === 'pagado') {
+        // Pedidos cobrados en efectivo/Yape: su cobro pasa a ser un abono de la cuenta semanal
+        // (los liquidados con abonos ya tienen sus abonos, que también se transfieren)
+        const paidDirect = c.paymentStatus === 'pagado' && c.paymentMethod !== 'abono';
+        if (paidDirect) {
           const hasPayment = payments.some(
             (p) =>
               (p.clientId === finalClientId || p.clientName.trim().toLowerCase() === clientNameNorm) &&
@@ -3137,6 +3194,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           ...c,
           clientId: finalClientId,
           accountType: 'semanal' as const,
+          ...(paidDirect ? { paymentMethod: 'abono' as const } : {}),
         };
       }
       return c;
@@ -4057,23 +4115,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 No hay clientes con cuenta semanal en este filtro. Presiona "+ Cliente" en la barra superior para registrar uno.
               </div>
             ) : (() => {
-              const pendingWeeklyClients = weeklyClients.filter((client) => {
-                const totalPaid = payments.filter((p) => p.clientId === client.id).reduce((s, p) => s + p.amount, 0);
-                const totalCons = consumptions.filter((c) => c.clientId === client.id).reduce((s, c) => s + c.total, 0);
-                return (totalCons - totalPaid) > 0.01;
-              });
-
-              const cancelledWeeklyClients = weeklyClients.filter((client) => {
-                const totalPaid = payments.filter((p) => p.clientId === client.id).reduce((s, p) => s + p.amount, 0);
-                const totalCons = consumptions.filter((c) => c.clientId === client.id).reduce((s, c) => s + c.total, 0);
-                return (totalCons - totalPaid) <= 0.01;
-              });
-
-              const totalPendingWeeklyDebt = pendingWeeklyClients.reduce((sum, client) => {
-                const totalPaid = payments.filter((p) => p.clientId === client.id).reduce((s, p) => s + p.amount, 0);
-                const totalCons = consumptions.filter((c) => c.clientId === client.id).reduce((s, c) => s + c.total, 0);
-                return sum + Math.max(0, totalCons - totalPaid);
-              }, 0);
+              const pendingWeeklyClients = weeklyClients.filter((client) => weeklyDebtOf(client.id) > 0.01);
+              const cancelledWeeklyClients = weeklyClients.filter((client) => weeklyDebtOf(client.id) <= 0.01);
+              const totalPendingWeeklyDebt = roundMoney(
+                pendingWeeklyClients.reduce((sum, client) => sum + weeklyDebtOf(client.id), 0)
+              );
 
               const renderWeeklyCard = (client: ClientRecord) => {
                 const isWeeklyCollapsed = !!collapsedWeeklyAccounts[client.id];
@@ -4094,32 +4140,21 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 const weekDatesSet = new Set(currentWeekDays.map((d) => d.dateStr));
                 const clientPayments = payments.filter((p) => p.clientId === client.id);
 
-                // Consumos de esta semana pendientes de pago
-                const clientWeekPendingCons = clientWeekConsumptions
-                  .flatMap((d) => d.consumptions)
-                  .filter((c) => c.paymentStatus !== 'pagado');
-                const baseDeudaActual = clientWeekPendingCons.reduce((s, c) => s + c.total, 0);
-
-                // Consumos y pagos antes del lunes de esta semana (DP base)
-                const consumptionsBeforeWeek = consumptions.filter(
-                  (c) => c.clientId === client.id && c.date < mondayDateStr
+                // Deuda según el libro del cliente (pedidos − abonos repartidos entre los pedidos)
+                const ledger = weeklyLedgers.get(client.id);
+                const coverageOf = (cons: ConsumptionRecord) => ledger?.coverage.get(cons.id);
+                const clientAllCons = consumptions.filter((c) => c.clientId === client.id);
+                const remainingOf = (cons: ConsumptionRecord) => coverageOf(cons)?.remaining ?? 0;
+                const deudaPasada = roundMoney(
+                  clientAllCons.filter((c) => c.date < mondayDateStr).reduce((s, c) => s + remainingOf(c), 0)
                 );
-                const consumptionsBeforeWeekPending = consumptionsBeforeWeek.filter(
-                  (c) => c.paymentStatus !== 'pagado'
+                const deudaActual = roundMoney(
+                  clientAllCons.filter((c) => weekDatesSet.has(c.date)).reduce((s, c) => s + remainingOf(c), 0)
                 );
-                const paymentsBeforeWeek = payments.filter(
-                  (p) => p.clientId === client.id && p.date < mondayDateStr
-                );
-
-                const consumptionsBeforeWeekTotal = consumptionsBeforeWeek.reduce((s, c) => s + c.total, 0);
-                const paymentsBeforeWeekTotal = paymentsBeforeWeek.reduce((s, p) => s + p.amount, 0);
-
-                const baseDeudaPasada = Math.max(
-                  0,
-                  consumptionsBeforeWeekPending.length > 0 && consumptionsBeforeWeek.some((c) => c.paymentStatus === 'pagado')
-                    ? consumptionsBeforeWeekPending.reduce((s, c) => s + c.total, 0) - paymentsBeforeWeekTotal
-                    : consumptionsBeforeWeekTotal - paymentsBeforeWeekTotal
-                );
+                const deudaTotal = roundMoney(deudaPasada + deudaActual);
+                const weekConsList = clientWeekConsumptions.flatMap((d) => d.consumptions);
+                const weekFullyPaid =
+                  weekConsList.length > 0 && weekConsList.every((c) => remainingOf(c) <= 0.001);
 
                 // Pagos y abonos registrados para esta semana
                 const clientWeekPayments = clientPayments.filter(
@@ -4128,46 +4163,29 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 const clientOtherPayments = clientPayments.filter(
                   (p) => !weekDatesSet.has(p.date) && p.date < mondayDateStr
                 );
-
-                // 1. Pagos directos de DP (Cancelo DP)
                 const clientWeekDpPayments = clientWeekPayments.filter((p) => isPaymentDp(p));
-                const dpPaidThisWeek = clientWeekDpPayments.reduce((s, p) => s + p.amount, 0);
-
-                // 2. Pagos directos de DA (Cancelo DA)
                 const clientWeekDaPayments = clientWeekPayments.filter((p) => isPaymentDa(p));
-                const daPaidThisWeek = clientWeekDaPayments.reduce((s, p) => s + p.amount, 0);
-
-                // 3. Abonos generales de esta semana (no son DP ni DA directos)
                 const clientWeekRegularPayments = clientWeekPayments.filter(
                   (p) => !isPaymentDp(p) && !isPaymentDa(p)
                 );
 
-                // Reducción inicial por pagos directos de DP y DA
-                let currentDP = Math.max(0, baseDeudaPasada - dpPaidThisWeek);
-                let currentDA = Math.max(0, baseDeudaActual - daPaidThisWeek);
-
-                // Cascada de Abonos solicitada:
-                // El abono primero resta a DP. Si el abono supera la DP, liquida la DP a 0 y el saldo restante resta a DA.
-                let totalAbonoAppliedToDp = 0;
-                let totalAbonoAppliedToDa = 0;
+                // A qué deuda fue cada abono (pasada = antes del lunes / actual = esta semana)
+                const consDateById = new Map(clientAllCons.map((c) => [c.id, c.date]));
                 const abonosWithBreakdown = clientWeekRegularPayments.map((p) => {
-                  const toDp = Math.min(currentDP, p.amount);
-                  currentDP = Math.max(0, currentDP - toDp);
-                  const leftover = p.amount - toDp;
-                  const toDa = Math.min(currentDA, leftover);
-                  currentDA = Math.max(0, currentDA - toDa);
-                  totalAbonoAppliedToDp += toDp;
-                  totalAbonoAppliedToDa += toDa;
+                  let toDp = 0;
+                  let toDa = 0;
+                  (ledger?.allocations.get(p.id) || []).forEach(({ consumptionId, amount }) => {
+                    const d = consDateById.get(consumptionId) || '';
+                    if (d < mondayDateStr) toDp += amount;
+                    else if (weekDatesSet.has(d)) toDa += amount;
+                  });
                   return {
                     payment: p,
-                    appliedToDp: toDp,
-                    appliedToDa: toDa,
+                    appliedToDp: roundMoney(toDp),
+                    appliedToDa: roundMoney(toDa),
+                    paidOrderId: linkedConsumptionId(p.id),
                   };
                 });
-
-                const deudaPasada = Math.max(0, currentDP);
-                const deudaActual = Math.max(0, currentDA);
-                const deudaTotal = deudaPasada + deudaActual;
 
                 return (
                   <div
@@ -4410,16 +4428,25 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     {/* Monday to Saturday Grid & Abonos (Collapsible) */}
                     {!isWeeklyCollapsed && (
                       <div className="p-3 sm:p-4">
+                        {weekFullyPaid && (
+                          <div className="mb-2 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-black flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                            <span>Semana pagada</span>
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                         {clientWeekConsumptions.map((dayData) => {
                           const hasConsumption = dayData.consumptions.length > 0;
                           const isCurrentDay = dayData.dateStr === today;
+                          const dayPaid = hasConsumption && dayData.consumptions.every((c) => remainingOf(c) <= 0.001);
 
                           return (
                             <div
                               key={dayData.dateStr}
                               className={`p-2 rounded-xl border flex flex-col justify-between min-h-[140px] transition-colors ${
-                                isCurrentDay
+                                dayPaid
+                                  ? `border-emerald-300 bg-emerald-50/60${isCurrentDay ? ' ring-1 ring-emerald-400' : ''}`
+                                  : isCurrentDay
                                   ? 'border-amber-500 bg-amber-50/40 ring-1 ring-amber-400'
                                   : hasConsumption
                                   ? 'border-stone-200 bg-white'
@@ -4449,7 +4476,18 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                 {hasConsumption ? (
                                   <div className="space-y-1.5 my-1">
                                     {dayData.consumptions.map((cons) => {
-                                      const isPaid = cons.paymentStatus === 'pagado';
+                                      const cov = coverageOf(cons);
+                                      const state = cov?.state ?? (isDirectlyPaid(cons) ? 'directo' : 'pendiente');
+                                      // Verde: pagado directo, con su propio pago o cubierto por abonos
+                                      const isPaid = state === 'directo' || state === 'pagado' || state === 'abono';
+                                      const remaining = cov?.remaining ?? (isPaid ? 0 : cons.total);
+                                      const canUndo = cons.paymentStatus === 'pagado';
+                                      const paidLabel =
+                                        state === 'directo'
+                                          ? cons.paymentMethod?.toUpperCase() || 'PAGADO'
+                                          : state === 'pagado'
+                                          ? cov?.linkedMethod?.toUpperCase() || 'PAGADO'
+                                          : 'CON ABONO';
                                       const totalItems = cons.lunches.length + cons.extras.length;
 
                                       return (
@@ -4468,7 +4506,14 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                             {isPaid ? (
                                               <span className="text-[9px] bg-emerald-100 text-emerald-900 font-extrabold px-1.5 py-0.2 rounded border border-emerald-300 shrink-0 flex items-center gap-0.5">
                                                 <Check className="w-2.5 h-2.5 text-emerald-700" />
-                                                <span>{cons.paymentMethod?.toUpperCase() || 'PAGADO'}</span>
+                                                <span>{paidLabel}</span>
+                                              </span>
+                                            ) : state === 'parcial' ? (
+                                              <span
+                                                className="text-[9px] bg-sky-100 text-sky-900 font-bold px-1 py-0.2 rounded shrink-0"
+                                                title={`Abonado ${formatCurrency(cons.total - remaining)}`}
+                                              >
+                                                Falta {formatCurrency(remaining)}
                                               </span>
                                             ) : (
                                               <span className="text-[9px] bg-amber-100 text-amber-900 font-bold px-1 py-0.2 rounded shrink-0">
@@ -4484,7 +4529,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                           )}
 
                                           {/* Desglose individual de cobro por producto si tiene adicionales o varios platos y está pendiente */}
-                                          {!isPaid && totalItems > 1 && (
+                                          {state === 'pendiente' && totalItems > 1 && (
                                             <div className="mt-1 pt-1 border-t border-dashed border-stone-200 space-y-0.5">
                                               <span className="text-[9px] text-stone-500 font-bold block">Pagar por producto:</span>
                                               {cons.lunches.map((l) => (
@@ -4543,7 +4588,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                               {formatCurrency(cons.total)}
                                             </span>
                                             <div className="flex items-center gap-1">
-                                              {isPaid ? (
+                                              {canUndo ? (
                                                 <button
                                                   type="button"
                                                   onClick={() => handleRevertWeeklyConsumption(client, cons)}
@@ -4552,7 +4597,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                                 >
                                                   Deshacer
                                                 </button>
-                                              ) : (
+                                              ) : isPaid ? null : (
                                                 <>
                                                   <button
                                                     type="button"
@@ -4595,7 +4640,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                     })}
 
                                     {/* Si hay 2 o más pedidos en el día y hay saldo pendiente, botón para cobrar todo el día junto */}
-                                    {dayData.consumptions.length > 1 && dayData.consumptions.some(c => c.paymentStatus !== 'pagado') && (
+                                    {dayData.consumptions.length > 1 && dayData.consumptions.some((c) => remainingOf(c) > 0.001) && (
                                       <div className="bg-amber-50 border border-amber-300 p-1 rounded-lg flex items-center justify-between text-[10px]">
                                         <span className="font-bold text-amber-900">Cobrar día:</span>
                                         <div className="flex items-center gap-1">
@@ -4710,7 +4755,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                                   title={`Abono registrado el ${p.dayOfWeek} ${p.date}: ${formatCurrency(p.amount)} (${p.method})`}
                                 >
                                   <DollarSign className="w-3.5 h-3.5 text-blue-700 shrink-0" />
-                                  <span>Abono ({p.dayOfWeek} {p.date.substring(5)}):</span>
+                                  <span>{p.notes && p.notes.startsWith('Pagó') ? p.notes : 'Abono'} ({p.dayOfWeek} {p.date.substring(5)}):</span>
                                   <strong className="text-blue-950 font-bold">{formatCurrency(p.amount)}</strong>
                                   <span className="uppercase text-[9px] px-1 bg-white rounded text-blue-800 font-bold border border-blue-200">
                                     {p.method}
