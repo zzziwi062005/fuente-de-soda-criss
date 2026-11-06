@@ -33,6 +33,7 @@ import { formatPhoneForWhatsApp, formatPhoneDisplay } from '../utils/phone';
 import { ClientsDirectoryModal } from './ClientsDirectoryModal';
 import { MergeConsumptionsModal } from './MergeConsumptionsModal';
 import { LonchesBoard } from './LonchesBoard';
+import { LoncheAlerts } from './LoncheAlerts';
 import { normalizeClientName, findClientByName, searchClientsAutocomplete } from '../utils/clientUtils';
 import { 
   BookOpen, 
@@ -566,28 +567,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   const [editItemNotes, setEditItemNotes] = useState<string>('');
 
   // Filtros específicos para Cuentas Diarias
-  const [dailyCategoryFilter, setDailyCategoryFilter] = useState<'todos' | 'mesas' | 'tiendas'>('todos');
   const [dailyStatusFilter, setDailyStatusFilter] = useState<'todos' | 'pendientes' | 'cobrados'>('todos');
-
-  // Modal: Tomar Pedido en Mesa (Registro individual de comanda por mesa)
-  const [showAddMesaModal, setShowAddMesaModal] = useState<boolean>(false);
-  const [mesaOrderDraft, setMesaOrderDraft] = useState<{
-    mesaName: string;
-    menuCompletoQty: number;
-    soloSegundoQty: number;
-    selectedExtras: { extra: ExtraItem; quantity: number }[];
-    notes: string;
-    paymentStatus: 'pendiente' | 'pagado';
-    paymentMethod: PaymentMethod;
-  }>({
-    mesaName: 'Mesa 1',
-    menuCompletoQty: 1,
-    soloSegundoQty: 0,
-    selectedExtras: [],
-    notes: '',
-    paymentStatus: 'pendiente',
-    paymentMethod: 'efectivo',
-  });
 
   // Modal: Transformar Cuenta Diaria a Cuenta Semanal
   const [showTransformModal, setShowTransformModal] = useState<boolean>(false);
@@ -1045,13 +1025,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   // Sublistas y filtros para Cuentas Diarias
   const filteredDailyAccounts = useMemo<DailyClientAccount[]>(() => {
     return dailyAccountsList.filter((account) => {
-      if (dailyCategoryFilter === 'mesas' && !account.isMesa) return false;
-      if (dailyCategoryFilter === 'tiendas' && account.isMesa) return false;
       if (dailyStatusFilter === 'pendientes' && account.isFullyPaid) return false;
       if (dailyStatusFilter === 'cobrados' && !account.isFullyPaid) return false;
       return true;
     });
-  }, [dailyAccountsList, dailyCategoryFilter, dailyStatusFilter]);
+  }, [dailyAccountsList, dailyStatusFilter]);
 
   // 1. Zona: "Menus por cobrar" (Pendientes de pago)
   const porCobrarAccounts = useMemo(() => {
@@ -1068,8 +1046,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     });
   }, [filteredDailyAccounts]);
 
-  const mesaDailyAccounts = useMemo(() => dailyAccountsList.filter((a) => a.isMesa), [dailyAccountsList]);
-  const tiendaDailyAccounts = useMemo(() => dailyAccountsList.filter((a) => !a.isMesa), [dailyAccountsList]);
   const pendingDailyAccounts = useMemo(() => dailyAccountsList.filter((a) => !a.isFullyPaid), [dailyAccountsList]);
   const paidDailyAccounts = useMemo(() => dailyAccountsList.filter((a) => a.isFullyPaid), [dailyAccountsList]);
 
@@ -1120,22 +1096,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         (c.paymentDate === selectedDate || (!c.paymentDate && c.date === selectedDate))
     );
 
-    const paidMesaConsumptions = paidDailyConsumptions.filter(
-      (c) => normalizePiso(c.piso) === 'Mesa' || c.clientName.trim().toLowerCase().startsWith('mesa')
-    );
-    const paidTiendaConsumptions = paidDailyConsumptions.filter(
-      (c) => !(normalizePiso(c.piso) === 'Mesa' || c.clientName.trim().toLowerCase().startsWith('mesa'))
-    );
+    // El contador de mesa (registros antiguos) se mantiene solo para no perder montos históricos.
+    const paidTiendaConsumptions = paidDailyConsumptions;
 
-    let mesaFromOrdersCash = 0;
-    let mesaFromOrdersYape = 0;
-    paidMesaConsumptions.forEach((c) => {
-      if (c.paymentMethod === 'efectivo') mesaFromOrdersCash += c.total;
-      else if (c.paymentMethod === 'yape') mesaFromOrdersYape += c.total;
-    });
-
-    const mesaCash = rawMesaCash + mesaFromOrdersCash;
-    const mesaYape = rawMesaYape + mesaFromOrdersYape;
+    const mesaCash = rawMesaCash;
+    const mesaYape = rawMesaYape;
     const mesaTotal = mesaCash + mesaYape;
 
     let dailyCash = 0;
@@ -1171,7 +1136,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       totalYape,
       totalGeneral,
       paidDailyConsumptions,
-      paidMesaConsumptions,
       paidTiendaConsumptions,
       dayPayments,
     };
@@ -3000,133 +2964,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   };
 
   // =========================================================================
-  // HANDLERS: REGISTRO INDIVIDUAL DE COMANDAS EN MESA
-  // =========================================================================
-  const handleOpenAddMesaOrder = () => {
-    // Detectar números de mesa usados hoy para sugerir la siguiente correlativa
-    const usedNumbers: number[] = [];
-    dailyAccountsList.forEach((acc) => {
-      if (acc.isMesa) {
-        const match = acc.clientName.match(/mesa\s*(\d+)/i);
-        if (match) {
-          usedNumbers.push(parseInt(match[1], 10));
-        }
-      }
-    });
-    let nextNum = 1;
-    while (usedNumbers.includes(nextNum)) {
-      nextNum++;
-    }
-
-    setMesaOrderDraft({
-      mesaName: `Mesa ${nextNum}`,
-      menuCompletoQty: 1,
-      soloSegundoQty: 0,
-      selectedExtras: [],
-      notes: '',
-      paymentStatus: 'pendiente',
-      paymentMethod: 'efectivo',
-    });
-    setShowAddMesaModal(true);
-  };
-
-  const handleSaveMesaOrder = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmedName = mesaOrderDraft.mesaName.trim();
-    if (!trimmedName) return;
-
-    // Buscar o registrar automáticamente el cliente tipo 'Mesa'
-    let mesaClient = clients.find(
-      (c) => c.name.trim().toLowerCase() === trimmedName.toLowerCase()
-    );
-
-    let updatedClients = [...clients];
-    let clientId = mesaClient?.id;
-
-    if (!mesaClient) {
-      clientId = `mesa-cli-${Date.now()}`;
-      mesaClient = {
-        id: clientId,
-        name: trimmedName,
-        piso: 'Mesa',
-        accountType: 'diaria',
-        active: true,
-        notes: 'Comensal en Mesa Salón',
-      };
-      updatedClients.push(mesaClient);
-      onSaveClients(updatedClients);
-    }
-
-    const menuCompletoTotal = mesaOrderDraft.menuCompletoQty * BASE_PRICES.mesa.menu_completo;
-    const soloSegundoTotal = mesaOrderDraft.soloSegundoQty * BASE_PRICES.mesa.solo_segundo;
-
-    const lunches: LunchItem[] = [];
-    if (mesaOrderDraft.menuCompletoQty > 0) {
-      lunches.push({
-        id: `ln-mc-${Date.now()}`,
-        clientType: 'mesa',
-        menuType: 'menu_completo',
-        segundo: 'Menú Completo',
-        quantity: mesaOrderDraft.menuCompletoQty,
-        unitPrice: BASE_PRICES.mesa.menu_completo,
-        totalPrice: menuCompletoTotal,
-      });
-    }
-
-    if (mesaOrderDraft.soloSegundoQty > 0) {
-      lunches.push({
-        id: `ln-ss-${Date.now()}`,
-        clientType: 'mesa',
-        menuType: 'solo_segundo',
-        segundo: 'Solo Segundo',
-        quantity: mesaOrderDraft.soloSegundoQty,
-        unitPrice: BASE_PRICES.mesa.solo_segundo,
-        totalPrice: soloSegundoTotal,
-      });
-    }
-
-    const extrasOrderList: OrderExtraItem[] = mesaOrderDraft.selectedExtras.map((item) => ({
-      id: `ex-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      extraId: item.extra.id,
-      name: item.extra.name,
-      description: item.extra.description,
-      price: item.extra.price,
-      quantity: item.quantity,
-      totalPrice: item.extra.price * item.quantity,
-    }));
-
-    const extrasTotal = extrasOrderList.reduce((sum, item) => sum + item.totalPrice, 0);
-    const grandTotal = menuCompletoTotal + soloSegundoTotal + extrasTotal;
-
-    if (lunches.length === 0 && extrasOrderList.length === 0) {
-      alert('Debes indicar al menos 1 menú o 1 bebida para abrir la comanda de mesa.');
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-    const newConsumption: ConsumptionRecord = {
-      id: `cons-${Date.now()}`,
-      clientId: clientId || `mesa-${Date.now()}`,
-      clientName: trimmedName,
-      piso: 'Mesa',
-      accountType: 'diaria',
-      date: selectedDate,
-      dayOfWeek: getDayOfWeekName(selectedDate),
-      timestamp: nowIso,
-      lunches,
-      extras: extrasOrderList,
-      total: grandTotal,
-      paymentStatus: mesaOrderDraft.paymentStatus,
-      paymentMethod: mesaOrderDraft.paymentStatus === 'pagado' ? mesaOrderDraft.paymentMethod : undefined,
-      paymentDate: mesaOrderDraft.paymentStatus === 'pagado' ? selectedDate : undefined,
-      notes: mesaOrderDraft.notes.trim() || undefined,
-    };
-
-    onSaveConsumptions([newConsumption, ...consumptions]);
-    setShowAddMesaModal(false);
-  };
-
-  // =========================================================================
   // HANDLERS: TRANSFORMAR CUENTA DIARIA A CUENTA SEMANAL (Y VICEVERSA)
   // =========================================================================
   const handleOpenTransformToWeekly = (account: DailyClientAccount) => {
@@ -3845,7 +3682,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         </div>
       </div>
 
-      {/* Sub-tab Navigation (Cuentas Semanales, Cuentas Diarias con Mesa, Caja Día y Semana, Lonches) */}
+      {/* Sub-tab Navigation (Cuentas Semanales, Cuentas Diarias, Caja Día y Semana, Lonches) */}
       <div className="bg-white rounded-2xl p-1.5 border border-stone-200 shadow-xs">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
           <button
@@ -3875,9 +3712,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           >
             <Calendar className="w-4 h-4" />
             <span>Cuentas Diarias</span>
-            <span className="text-[10px] sm:text-xs opacity-80 font-normal">
-              • Con Mesa
-            </span>
           </button>
 
           <button
@@ -4942,10 +4776,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
               </div>
               <div>
                 <span className="font-extrabold text-amber-950 text-sm sm:text-base block">
-                  Registro Diario de Mesas y Clientes
+                  Registro Diario de Clientes
                 </span>
                 <span className="text-[11px] text-stone-600">
-                  Cada comanda en mesa o cliente se gestiona como cuenta individual modificable y cobrable
+                  Cada cliente se gestiona como cuenta individual modificable y cobrable
                 </span>
               </div>
             </div>
@@ -4964,16 +4798,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
 
               <button
                 type="button"
-                onClick={handleOpenAddMesaOrder}
-                className="bg-amber-800 hover:bg-amber-900 text-white font-black text-xs px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 shadow-xs transition-colors"
-                title="Tomar nueva orden para una mesa del salón"
-              >
-                <Utensils className="w-4 h-4" />
-                <span>+ Tomar Pedido en Mesa</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={() => handleOpenNewDailyOrder(selectedDate, selectedPiso !== 'todos' ? selectedPiso : undefined)}
                 className="bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 font-bold text-xs px-3 py-2.5 rounded-xl flex items-center gap-1.5 shadow-2xs transition-colors"
                 title="Anotar pedido para cliente de tienda, oficina o calle"
@@ -4984,65 +4808,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
             </div>
           </div>
 
-          {/* Tarjetas de Resumen Rápido del Salón y Cuentas Diarias */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <div className="bg-white p-3.5 rounded-2xl border border-stone-200 shadow-2xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wide">Mesas Atendidas</span>
-                <div className="p-1 bg-amber-100 text-amber-900 rounded-lg">
-                  <Utensils className="w-3.5 h-3.5" />
-                </div>
-              </div>
-              <div className="text-xl sm:text-2xl font-black text-stone-900 mt-1">
-                {mesaDailyAccounts.length}
-              </div>
-              <div className="text-[11px] text-stone-500 mt-0.5">
-                Mesas registradas hoy
-              </div>
-            </div>
-
-            <div className="bg-white p-3.5 rounded-2xl border border-amber-200 shadow-2xs bg-amber-50/30">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-amber-900 uppercase tracking-wide">Mesas Abiertas</span>
-                <span className="w-2 h-2 rounded-full bg-rose-600 animate-pulse"></span>
-              </div>
-              <div className="text-xl sm:text-2xl font-black text-rose-700 mt-1">
-                {mesaDailyAccounts.filter((a) => !a.isFullyPaid).length}
-              </div>
-              <div className="text-[11px] text-stone-600 mt-0.5 truncate">
-                Pendiente: <strong className="text-rose-700">{formatCurrency(mesaDailyAccounts.reduce((s, a) => s + a.saldoPendiente, 0))}</strong>
-              </div>
-            </div>
-
-            <div className="bg-white p-3.5 rounded-2xl border border-emerald-200 shadow-2xs bg-emerald-50/20">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-emerald-900 uppercase tracking-wide">Cobrado en Mesas</span>
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              </div>
-              <div className="text-xl sm:text-2xl font-black text-emerald-900 mt-1">
-                {formatCurrency(cajaDelDia.mesaTotal)}
-              </div>
-              <div className="text-[11px] text-stone-600 mt-0.5 truncate">
-                Efec: {formatCurrency(cajaDelDia.mesaCash)} • Yape: {formatCurrency(cajaDelDia.mesaYape)}
-              </div>
-            </div>
-
-            <div className="bg-white p-3.5 rounded-2xl border border-stone-200 shadow-2xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wide">Tiendas / Calle</span>
-                <Clock className="w-3.5 h-3.5 text-blue-700" />
-              </div>
-              <div className="text-xl sm:text-2xl font-black text-stone-900 mt-1">
-                {tiendaDailyAccounts.length}
-              </div>
-              <div className="text-[11px] text-stone-600 mt-0.5 truncate">
-                Pendiente: <strong className="text-rose-700">{formatCurrency(tiendaDailyAccounts.reduce((s, a) => s + a.saldoPendiente, 0))}</strong>
-              </div>
-            </div>
-          </div>
-
-
-
           {/* Consolidado del día en Caja */}
           <div className="bg-amber-900 text-white rounded-xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
             <div className="text-xs">
@@ -5050,10 +4815,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                 Cuentas del Día ({selectedDate}):
               </span>
               <span className="text-amber-100 ml-2">
-                Mesas: {formatCurrency(cajaDelDia.mesaTotal)} • Diarias: {formatCurrency(cajaDelDia.dailyTotal)} • Abonos: {formatCurrency(cajaDelDia.abonosTotal)}
+                {cajaDelDia.mesaTotal > 0 ? `Mesa: ${formatCurrency(cajaDelDia.mesaTotal)} • ` : ''}Diarias: {formatCurrency(cajaDelDia.dailyTotal)} • Abonos: {formatCurrency(cajaDelDia.abonosTotal)}
               </span>
               <div className="text-[11px] text-amber-300/90 mt-0.5">
-                Saldo pendiente por cobrar hoy en diarias y mesas: <strong className="text-amber-100">{formatCurrency(dailyAccountsList.reduce((s, a) => s + a.saldoPendiente, 0))}</strong>
+                Saldo pendiente por cobrar hoy en diarias: <strong className="text-amber-100">{formatCurrency(dailyAccountsList.reduce((s, a) => s + a.saldoPendiente, 0))}</strong>
               </div>
             </div>
             <div className="text-right flex items-center gap-2">
@@ -5067,43 +4832,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
           {/* Cuentas Diarias y Mesas Consolidadas */}
           <div className="space-y-4">
             <div className="bg-stone-100/90 border border-stone-200 rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 flex-wrap">
-              {/* Filtros de Categoría */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setDailyCategoryFilter('todos')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                    dailyCategoryFilter === 'todos'
-                      ? 'bg-stone-900 text-white shadow-xs'
-                      : 'bg-white text-stone-700 border border-stone-200 hover:bg-stone-50'
-                  }`}
-                >
-                  📋 Todas ({dailyAccountsList.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDailyCategoryFilter('mesas')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 ${
-                    dailyCategoryFilter === 'mesas'
-                      ? 'bg-amber-800 text-white shadow-xs'
-                      : 'bg-white text-stone-700 border border-stone-200 hover:bg-stone-50'
-                  }`}
-                >
-                  <Utensils className="w-3 h-3" />
-                  <span>Mesas Salón ({mesaDailyAccounts.length})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDailyCategoryFilter('tiendas')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 ${
-                    dailyCategoryFilter === 'tiendas'
-                      ? 'bg-blue-800 text-white shadow-xs'
-                      : 'bg-white text-stone-700 border border-stone-200 hover:bg-stone-50'
-                  }`}
-                >
-                  🏢 Tiendas y Calle ({tiendaDailyAccounts.length})
-                </button>
-              </div>
+              <span className="text-xs font-bold text-stone-700">📋 Cuentas del día ({dailyAccountsList.length})</span>
 
               {/* Filtros de Estado & Expandir/Contraer */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -5722,7 +5451,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
               if (filteredDailyAccounts.length === 0) {
                 return (
                   <div className="bg-white rounded-2xl p-8 text-center border border-stone-200 text-stone-500 text-xs sm:text-sm">
-                    No hay pedidos registrados en este filtro o fecha. Presiona "+ Tomar Pedido en Mesa" o "+ Anotar Pedido Diario" para comenzar.
+                    No hay pedidos registrados en este filtro o fecha. Presiona "+ Anotar Pedido Diario" para comenzar.
                   </div>
                 );
               }
@@ -5890,7 +5619,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
             </div>
 
             <div className="text-xs text-stone-500 font-medium px-2">
-              Visualizando ingresos de Mesa, Cuentas Diarias y Abonos Semanales
+              Visualizando ingresos de Cuentas Diarias y Abonos Semanales
             </div>
           </div>
 
@@ -5960,8 +5689,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                   Desglose del Día por Origen
                 </h4>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {/* 1. Mesa */}
+                <div className={`grid grid-cols-1 gap-3 ${cajaDelDia.mesaTotal > 0 ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
+                  {/* 1. Mesa (solo registros antiguos del contador) */}
+                  {cajaDelDia.mesaTotal > 0 && (
                   <div className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/60 space-y-1.5">
                     <div className="flex justify-between items-center">
                       <span className="font-bold text-xs uppercase text-amber-900 flex items-center gap-1">
@@ -5983,6 +5713,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                       </div>
                     </div>
                   </div>
+                  )}
 
                   {/* 2. Cuentas Diarias Cobradas */}
                   <div className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/60 space-y-1.5">
@@ -6084,6 +5815,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                         >
                           Todos ({totalCobrosCount})
                         </button>
+                        {hasMesaActivity && (
                         <button
                           type="button"
                           onClick={() => setCajaListFilter('mesa')}
@@ -6095,6 +5827,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                         >
                           Mesa ({hasMesaActivity ? 1 : 0})
                         </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setCajaListFilter('diarias')}
@@ -6129,7 +5862,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                             No hay cobros registrados en esta categoría para la fecha seleccionada ({selectedDate}).
                           </p>
                           <p className="text-[11px] text-stone-400 mt-1">
-                            A medida que cobres en Mesa Salón, marques cuentas diarias como pagadas o registres abonos semanales, aparecerán listados aquí para que puedas revisarlos y corregir cualquier error.
+                            A medida que marques cuentas diarias como pagadas o registres abonos semanales, aparecerán listados aquí para que puedas revisarlos y corregir cualquier error.
                           </p>
                         </div>
                       ) : (
@@ -6398,7 +6131,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     </h3>
                   </div>
                   <p className="text-xs text-teal-200 mt-0.5">
-                    Control acumulado de lunes a sábado de Mesa, Cuentas Diarias cobradas y Abonos Semanales.
+                    Control acumulado de lunes a sábado de Cuentas Diarias cobradas y Abonos Semanales.
                   </p>
                 </div>
 
@@ -6484,7 +6217,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                       <tr>
                         <th className="py-2.5 px-3">Día</th>
                         <th className="py-2.5 px-3">Fecha</th>
-                        <th className="py-2.5 px-3 text-right">Mesa</th>
+                        {cajaSemanal.totalMesa > 0 && <th className="py-2.5 px-3 text-right">Mesa</th>}
                         <th className="py-2.5 px-3 text-right">Diarias Cobradas</th>
                         <th className="py-2.5 px-3 text-right">Abonos Semanales</th>
                         <th className="py-2.5 px-3 text-right text-emerald-800">Efectivo</th>
@@ -6506,7 +6239,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                               {row.dayName} {isToday && <span className="text-[10px] text-amber-700 bg-amber-100 px-1 rounded ml-1">Hoy</span>}
                             </td>
                             <td className="py-2.5 px-3 text-stone-500">{row.dateStr}</td>
-                            <td className="py-2.5 px-3 text-right text-stone-700 font-medium">{formatCurrency(row.mesaTotal)}</td>
+                            {cajaSemanal.totalMesa > 0 && <td className="py-2.5 px-3 text-right text-stone-700 font-medium">{formatCurrency(row.mesaTotal)}</td>}
                             <td className="py-2.5 px-3 text-right text-stone-700 font-medium">{formatCurrency(row.dailyTotal)}</td>
                             <td className="py-2.5 px-3 text-right text-stone-700 font-medium">{formatCurrency(row.abonosTotal)}</td>
                             <td className="py-2.5 px-3 text-right text-emerald-800 font-bold">{formatCurrency(row.efectivo)}</td>
@@ -6523,7 +6256,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                         <td colSpan={2} className="py-3 px-3 uppercase text-[11px] tracking-wider">
                           TOTAL SEMANA
                         </td>
-                        <td className="py-3 px-3 text-right">{formatCurrency(cajaSemanal.totalMesa)}</td>
+                        {cajaSemanal.totalMesa > 0 && <td className="py-3 px-3 text-right">{formatCurrency(cajaSemanal.totalMesa)}</td>}
                         <td className="py-3 px-3 text-right">{formatCurrency(cajaSemanal.totalDiarias)}</td>
                         <td className="py-3 px-3 text-right">{formatCurrency(cajaSemanal.totalAbonos)}</td>
                         <td className="py-3 px-3 text-right text-emerald-800">{formatCurrency(cajaSemanal.totalEfectivo)}</td>
@@ -6557,7 +6290,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL: ANOTAR CONSUMO (Con botones para Mesa vs Tienda y Menú Completo vs Solo Segundo) */}
+      {/* MODAL: ANOTAR CONSUMO (Tarifa Afuera vs Tienda y Menú Completo vs Solo Segundo) */}
       {/* ========================================================================= */}
       {showAddConsumptionModal && consumptionDraft && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
@@ -6838,7 +6571,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
               </div>
 
               {!consumptionDraft.isLonche && (<>
-              {/* 1. SELECCIÓN DE ATENCIÓN: MESA O TIENDA (Botones de Selección) */}
+              {/* 1. TARIFA: AFUERA O TIENDA (solo cambia el precio) */}
               <div>
                 <label className="text-xs font-bold uppercase tracking-wider text-stone-600 block mb-1.5">
                   Lugar de Consumo (Tarifa):
@@ -6854,7 +6587,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     }`}
                   >
                     <span className="text-sm font-extrabold flex items-center gap-1.5">
-                      🍽️ Mesa
+                      Afuera
                     </span>
                     <span className="text-[11px] font-medium text-amber-800">
                       Completo: S/ 13.00 • Solo: S/ 12.00
@@ -6871,7 +6604,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     }`}
                   >
                     <span className="text-sm font-extrabold flex items-center gap-1.5">
-                      🏪 Tienda
+                      Tienda
                     </span>
                     <span className="text-[11px] font-medium text-amber-800">
                       Completo: S/ 12.00 • Solo: S/ 11.00
@@ -6913,23 +6646,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-1 border-t border-stone-100">
-                      <div className="flex items-center">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const newQty = Math.max(0, (consumptionDraft.completoQuantity || 0) - 1);
-                            setConsumptionDraft({
-                              ...consumptionDraft,
-                              completoQuantity: newQty,
-                              lunchQuantity: newQty + (consumptionDraft.segundoSoloQuantity || 0),
-                            });
-                          }}
-                          className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-black flex items-center justify-center text-sm transition-colors"
-                        >
-                          -
-                        </button>
-                        <input
+                    <div className="pt-2 border-t border-stone-100 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-1.5 text-sm font-bold text-stone-700">
+                          <span>Cantidad:</span>
+                          <input
                           type="number"
                           min="0"
                           value={consumptionDraft.completoQuantity ?? 0}
@@ -6941,10 +6662,35 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                               lunchQuantity: val + (consumptionDraft.segundoSoloQuantity || 0),
                             });
                           }}
-                          className="w-12 h-8 text-center font-black text-sm text-stone-900 focus:outline-none bg-transparent"
-                        />
+                            className="w-14 h-9 text-center font-black text-lg text-stone-900 bg-white border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                          />
+                        </label>
+                        <div className="text-right">
+                          <span className="text-[10px] text-stone-500 font-semibold block">Subtotal:</span>
+                          <span className="text-xs font-black text-stone-900">
+                          {formatCurrency((consumptionDraft.completoQuantity || 0) * BASE_PRICES[consumptionDraft.locationType].menu_completo)}
+                          </span>
+                        </div>
+                      </div>
+                      <div data-cantidad-barra className="grid grid-cols-2 rounded-xl overflow-hidden border border-stone-200 shadow-2xs">
                         <button
                           type="button"
+                          aria-label="Quitar uno"
+                          onClick={() => {
+                            const newQty = Math.max(0, (consumptionDraft.completoQuantity || 0) - 1);
+                            setConsumptionDraft({
+                              ...consumptionDraft,
+                              completoQuantity: newQty,
+                              lunchQuantity: newQty + (consumptionDraft.segundoSoloQuantity || 0),
+                            });
+                          }}
+                          className="h-12 bg-stone-100 hover:bg-stone-200 active:bg-stone-300 text-stone-800 font-black text-2xl flex items-center justify-center border-r border-stone-200 transition-colors"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Agregar uno"
                           onClick={() => {
                             const newQty = (consumptionDraft.completoQuantity || 0) + 1;
                             setConsumptionDraft({
@@ -6953,17 +6699,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                               lunchQuantity: newQty + (consumptionDraft.segundoSoloQuantity || 0),
                             });
                           }}
-                          className="w-8 h-8 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-black flex items-center justify-center text-sm shadow-2xs transition-colors"
+                          className="h-12 bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white font-black text-2xl flex items-center justify-center transition-colors"
                         >
                           +
                         </button>
-                      </div>
-
-                      <div className="text-right">
-                        <span className="text-[10px] text-stone-500 font-semibold block">Subtotal:</span>
-                        <span className="text-xs font-black text-stone-900">
-                          {formatCurrency((consumptionDraft.completoQuantity || 0) * BASE_PRICES[consumptionDraft.locationType].menu_completo)}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -6989,23 +6728,11 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-1 border-t border-stone-100">
-                      <div className="flex items-center">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const newQty = Math.max(0, (consumptionDraft.segundoSoloQuantity || 0) - 1);
-                            setConsumptionDraft({
-                              ...consumptionDraft,
-                              segundoSoloQuantity: newQty,
-                              lunchQuantity: (consumptionDraft.completoQuantity || 0) + newQty,
-                            });
-                          }}
-                          className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-black flex items-center justify-center text-sm transition-colors"
-                        >
-                          -
-                        </button>
-                        <input
+                    <div className="pt-2 border-t border-stone-100 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-1.5 text-sm font-bold text-stone-700">
+                          <span>Cantidad:</span>
+                          <input
                           type="number"
                           min="0"
                           value={consumptionDraft.segundoSoloQuantity ?? 0}
@@ -7017,10 +6744,35 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                               lunchQuantity: (consumptionDraft.completoQuantity || 0) + val,
                             });
                           }}
-                          className="w-12 h-8 text-center font-black text-sm text-stone-900 focus:outline-none bg-transparent"
-                        />
+                            className="w-14 h-9 text-center font-black text-lg text-stone-900 bg-white border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                          />
+                        </label>
+                        <div className="text-right">
+                          <span className="text-[10px] text-stone-500 font-semibold block">Subtotal:</span>
+                          <span className="text-xs font-black text-stone-900">
+                          {formatCurrency((consumptionDraft.segundoSoloQuantity || 0) * BASE_PRICES[consumptionDraft.locationType].solo_segundo)}
+                          </span>
+                        </div>
+                      </div>
+                      <div data-cantidad-barra className="grid grid-cols-2 rounded-xl overflow-hidden border border-stone-200 shadow-2xs">
                         <button
                           type="button"
+                          aria-label="Quitar uno"
+                          onClick={() => {
+                            const newQty = Math.max(0, (consumptionDraft.segundoSoloQuantity || 0) - 1);
+                            setConsumptionDraft({
+                              ...consumptionDraft,
+                              segundoSoloQuantity: newQty,
+                              lunchQuantity: (consumptionDraft.completoQuantity || 0) + newQty,
+                            });
+                          }}
+                          className="h-12 bg-stone-100 hover:bg-stone-200 active:bg-stone-300 text-stone-800 font-black text-2xl flex items-center justify-center border-r border-stone-200 transition-colors"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Agregar uno"
                           onClick={() => {
                             const newQty = (consumptionDraft.segundoSoloQuantity || 0) + 1;
                             setConsumptionDraft({
@@ -7029,17 +6781,10 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                               lunchQuantity: (consumptionDraft.completoQuantity || 0) + newQty,
                             });
                           }}
-                          className="w-8 h-8 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-black flex items-center justify-center text-sm shadow-2xs transition-colors"
+                          className="h-12 bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white font-black text-2xl flex items-center justify-center transition-colors"
                         >
                           +
                         </button>
-                      </div>
-
-                      <div className="text-right">
-                        <span className="text-[10px] text-stone-500 font-semibold block">Subtotal:</span>
-                        <span className="text-xs font-black text-stone-900">
-                          {formatCurrency((consumptionDraft.segundoSoloQuantity || 0) * BASE_PRICES[consumptionDraft.locationType].solo_segundo)}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -8257,7 +8002,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       {/* MODAL: EDITAR CLIENTE                                                     */}
       {/* ========================================================================= */}
       {editingClient && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-stone-200 overflow-hidden my-auto animate-in zoom-in-95 duration-150">
             <div className="bg-stone-900 text-white p-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -8670,7 +8415,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     }`}
                   >
                     <span className="text-xs font-extrabold flex items-center gap-1">
-                      🍽️ Mesa
+                      Afuera
                     </span>
                     <span className="text-[10px] font-medium text-amber-800">
                       Comp: {formatCurrency(BASE_PRICES.mesa.menu_completo)} • Solo: {formatCurrency(BASE_PRICES.mesa.solo_segundo)}
@@ -8687,7 +8432,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
                     }`}
                   >
                     <span className="text-xs font-extrabold flex items-center gap-1">
-                      🏪 Tienda / Salón
+                      Tienda
                     </span>
                     <span className="text-[10px] font-medium text-amber-800">
                       Comp: {formatCurrency(BASE_PRICES.tienda.menu_completo)} • Solo: {formatCurrency(BASE_PRICES.tienda.solo_segundo)}
@@ -9201,326 +8946,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL: TOMAR PEDIDO EN MESA (Registro individual de comanda por mesa)      */}
-      {/* ========================================================================= */}
-      {showAddMesaModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-stone-200 overflow-hidden my-auto max-h-[92vh] flex flex-col animate-in zoom-in-95 duration-150">
-            {/* Modal Header */}
-            <div className="p-4 sm:p-5 bg-amber-800 text-white flex justify-between items-center shrink-0">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-2xl bg-amber-700/80 border border-amber-500/50 flex items-center justify-center shadow-xs">
-                  <Utensils className="w-5 h-5 text-amber-100" />
-                </div>
-                <div>
-                  <h3 className="font-black text-base sm:text-lg">Tomar Pedido en Mesa</h3>
-                  <p className="text-xs text-amber-200">Comanda individual para salón ({selectedDate})</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAddMesaModal(false)}
-                className="w-8 h-8 rounded-xl bg-amber-900/60 hover:bg-amber-900 text-amber-200 flex items-center justify-center transition-colors font-bold text-base"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Modal Form Content */}
-            <form onSubmit={handleSaveMesaOrder} className="p-4 sm:p-6 overflow-y-auto space-y-4 flex-1">
-              {/* Mesa selector / name */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1.5">
-                  Identificador de Mesa:
-                </label>
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {['Mesa 1', 'Mesa 2', 'Mesa 3', 'Mesa 4', 'Mesa 5', 'Mesa 6', 'Mesa 7', 'Mesa 8'].map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setMesaOrderDraft((prev) => ({ ...prev, mesaName: m }))}
-                      className={`px-3 py-1 rounded-xl text-xs font-bold transition-colors ${
-                        mesaOrderDraft.mesaName.toLowerCase() === m.toLowerCase()
-                          ? 'bg-amber-800 text-white shadow-xs'
-                          : 'bg-stone-100 text-stone-700 hover:bg-stone-200 border border-stone-200'
-                      }`}
-                    >
-                      {m}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="text"
-                  required
-                  value={mesaOrderDraft.mesaName}
-                  onChange={(e) => setMesaOrderDraft((prev) => ({ ...prev, mesaName: e.target.value }))}
-                  placeholder="O escribe nombre personalizado (ej: Mesa 1, Barra, etc.)"
-                  className="w-full text-sm font-bold px-3 py-2 border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
-              </div>
-
-              {/* Platillos de Mesa (Tarifas Salón) */}
-              <div className="space-y-2.5">
-                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
-                  Platos Solicitados (Tarifas de Mesa):
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {/* Menú Completo */}
-                  <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex justify-between items-center mb-2">
-                      <div>
-                        <span className="font-extrabold text-stone-900 text-xs sm:text-sm block">🍽️ Menú Completo</span>
-                        <span className="text-[11px] text-amber-800 font-semibold">{formatCurrency(BASE_PRICES.mesa.menu_completo)} c/u</span>
-                      </div>
-                      <span className="font-black text-xs text-amber-950">
-                        {formatCurrency(mesaOrderDraft.menuCompletoQty * BASE_PRICES.mesa.menu_completo)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setMesaOrderDraft((prev) => ({
-                            ...prev,
-                            menuCompletoQty: Math.max(0, prev.menuCompletoQty - 1),
-                          }))
-                        }
-                        className="w-8 h-8 rounded-xl bg-white border border-stone-300 text-stone-700 font-bold flex items-center justify-center hover:bg-stone-100"
-                      >
-                        -
-                      </button>
-                      <span className="flex-1 text-center font-black text-base text-stone-900">
-                        {mesaOrderDraft.menuCompletoQty}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setMesaOrderDraft((prev) => ({
-                            ...prev,
-                            menuCompletoQty: prev.menuCompletoQty + 1,
-                          }))
-                        }
-                        className="w-8 h-8 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold flex items-center justify-center"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Segundo Solo */}
-                  <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-2xl flex flex-col justify-between">
-                    <div className="flex justify-between items-center mb-2">
-                      <div>
-                        <span className="font-extrabold text-stone-900 text-xs sm:text-sm block">🍛 Segundo Solo</span>
-                        <span className="text-[11px] text-amber-800 font-semibold">{formatCurrency(BASE_PRICES.mesa.solo_segundo)} c/u</span>
-                      </div>
-                      <span className="font-black text-xs text-amber-950">
-                        {formatCurrency(mesaOrderDraft.soloSegundoQty * BASE_PRICES.mesa.solo_segundo)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setMesaOrderDraft((prev) => ({
-                            ...prev,
-                            soloSegundoQty: Math.max(0, prev.soloSegundoQty - 1),
-                          }))
-                        }
-                        className="w-8 h-8 rounded-xl bg-white border border-stone-300 text-stone-700 font-bold flex items-center justify-center hover:bg-stone-100"
-                      >
-                        -
-                      </button>
-                      <span className="flex-1 text-center font-black text-base text-stone-900">
-                        {mesaOrderDraft.soloSegundoQty}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setMesaOrderDraft((prev) => ({
-                            ...prev,
-                            soloSegundoQty: prev.soloSegundoQty + 1,
-                          }))
-                        }
-                        className="w-8 h-8 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold flex items-center justify-center"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Extras y Bebidas */}
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
-                  Bebidas y Adicionales:
-                </label>
-                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-1 bg-stone-50 border border-stone-200 rounded-xl">
-                  {extrasCatalog.map((ex) => (
-                    <button
-                      key={ex.id}
-                      type="button"
-                      onClick={() => {
-                        setMesaOrderDraft((prev) => {
-                          const existingIdx = prev.selectedExtras.findIndex((item) => item.extra.id === ex.id);
-                          if (existingIdx >= 0) {
-                            const copy = [...prev.selectedExtras];
-                            copy[existingIdx].quantity += 1;
-                            return { ...prev, selectedExtras: copy };
-                          }
-                          return {
-                            ...prev,
-                            selectedExtras: [...prev.selectedExtras, { extra: ex, quantity: 1 }],
-                          };
-                        });
-                      }}
-                      className="px-2.5 py-1 bg-white hover:bg-amber-50 hover:border-amber-400 border border-stone-200 rounded-lg text-xs font-bold text-stone-800 shadow-2xs transition-colors"
-                    >
-                      + {ex.name} ({formatCurrency(ex.price)})
-                    </button>
-                  ))}
-                </div>
-
-                {mesaOrderDraft.selectedExtras.length > 0 && (
-                  <div className="space-y-1 bg-stone-100/80 p-2.5 rounded-xl border border-stone-200 text-xs">
-                    {mesaOrderDraft.selectedExtras.map((item, idx) => (
-                      <div key={item.extra.id} className="flex justify-between items-center">
-                        <span className="font-semibold text-stone-800">
-                          {item.quantity}x {item.extra.name} ({formatCurrency(item.extra.price)} c/u)
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className="font-black text-stone-900">
-                            {formatCurrency(item.extra.price * item.quantity)}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setMesaOrderDraft((prev) => ({
-                                ...prev,
-                                selectedExtras: prev.selectedExtras.filter((_, i) => i !== idx),
-                              }));
-                            }}
-                            className="text-stone-400 hover:text-rose-600 font-black px-1.5"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Nota / Indicaciones */}
-              <div>
-                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
-                  Nota / Preferencia (Opcional):
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ej: Sin ensalada, bien cocido, gaseosa helada, etc."
-                  value={mesaOrderDraft.notes}
-                  onChange={(e) => setMesaOrderDraft((prev) => ({ ...prev, notes: e.target.value }))}
-                  className="w-full text-xs px-3 py-2 border border-stone-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
-              </div>
-
-              {/* Estado de Cobro de la comanda */}
-              <div className="p-3 bg-stone-50 border border-stone-200 rounded-2xl space-y-2">
-                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider">
-                  Cobro de la Comanda:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setMesaOrderDraft((prev) => ({ ...prev, paymentStatus: 'pendiente' }))}
-                    className={`py-2 px-3 rounded-xl text-xs font-bold transition-colors border ${
-                      mesaOrderDraft.paymentStatus === 'pendiente'
-                        ? 'bg-amber-800 text-white border-amber-800 shadow-xs'
-                        : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-100'
-                    }`}
-                  >
-                    🔴 Cobrar al final
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMesaOrderDraft((prev) => ({ ...prev, paymentStatus: 'pagado' }))}
-                    className={`py-2 px-3 rounded-xl text-xs font-bold transition-colors border ${
-                      mesaOrderDraft.paymentStatus === 'pagado'
-                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
-                        : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-100'
-                    }`}
-                  >
-                    ✓ Pagado de inmediato
-                  </button>
-                </div>
-
-                {mesaOrderDraft.paymentStatus === 'pagado' && (
-                  <div className="pt-2 flex items-center gap-2">
-                    <span className="text-xs font-bold text-stone-600">Método:</span>
-                    <button
-                      type="button"
-                      onClick={() => setMesaOrderDraft((prev) => ({ ...prev, paymentMethod: 'efectivo' }))}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold ${
-                        mesaOrderDraft.paymentMethod === 'efectivo'
-                          ? 'bg-emerald-700 text-white'
-                          : 'bg-white border border-stone-200 text-stone-700'
-                      }`}
-                    >
-                      💵 Efectivo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setMesaOrderDraft((prev) => ({ ...prev, paymentMethod: 'yape' }))}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold ${
-                        mesaOrderDraft.paymentMethod === 'yape'
-                          ? 'bg-purple-700 text-white'
-                          : 'bg-white border border-stone-200 text-stone-700'
-                      }`}
-                    >
-                      📱 Yape
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Total Comanda */}
-              <div className="p-3 bg-amber-900 text-white rounded-2xl flex items-center justify-between shadow-xs">
-                <span className="text-xs font-bold text-amber-200 uppercase tracking-wider">
-                  Total de la Comanda:
-                </span>
-                <span className="text-xl font-black">
-                  {formatCurrency(
-                    mesaOrderDraft.menuCompletoQty * BASE_PRICES.mesa.menu_completo +
-                      mesaOrderDraft.soloSegundoQty * BASE_PRICES.mesa.solo_segundo +
-                      mesaOrderDraft.selectedExtras.reduce((sum, item) => sum + item.extra.price * item.quantity, 0)
-                  )}
-                </span>
-              </div>
-
-              {/* Actions */}
-              <div className="grid grid-cols-2 gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAddMesaModal(false)}
-                  className="w-full py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold rounded-xl text-xs transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="w-full py-2.5 bg-amber-800 hover:bg-amber-900 text-white font-black rounded-xl text-xs shadow-xs transition-colors"
-                >
-                  Guardar Comanda
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
       {/* MODAL: TRANSFORMAR CUENTA DIARIA A CUENTA SEMANAL                          */}
       {/* ========================================================================= */}
       {showTransformModal && accountToTransform && (
@@ -9581,7 +9006,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
         </div>
       )}
       {confirmModal && confirmModal.isOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-100">
+        <div className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-100">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-stone-200 overflow-hidden animate-in zoom-in-95 duration-150">
             <div className={`p-4 text-white flex items-center gap-3 ${confirmModal.isDestructive ? 'bg-rose-700' : 'bg-stone-900'}`}>
               <div className="p-2 bg-white/20 rounded-xl">
@@ -9635,6 +9060,8 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       {/* ========================================================================= */}
       {/* MODAL: DIRECTORIO Y ADMINISTRACIÓN DE CLIENTES                            */}
       {/* ========================================================================= */}
+      <LoncheAlerts consumptions={consumptions} onOpenLonches={() => setActiveTab('lonches')} />
+
       <ClientsDirectoryModal
         isOpen={showClientsDirectoryModal}
         onClose={() => setShowClientsDirectoryModal(false)}

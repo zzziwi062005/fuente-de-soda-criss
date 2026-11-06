@@ -50,8 +50,7 @@ const describeConsumption = (c: ConsumptionRecord): string => {
   const lunches = c.lunches
     .map((l) => {
       const name = l.menuType === 'menu_completo' ? 'Menú Completo' : 'Segundo Solo';
-      const loc = l.clientType === 'mesa' ? ' (Mesa)' : '';
-      return `${l.quantity}x ${name}${loc}`;
+      return `${l.quantity}x ${name}`;
     })
     .join(', ');
   const extras = c.extras.map((e) => `${e.quantity}x ${e.name}`).join(', ');

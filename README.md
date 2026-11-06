@@ -1,6 +1,6 @@
 # 🥤 Fuente de Soda Criss — Control de Ventas y Cobros
 
-Aplicación web para gestionar el día a día de una fuente de soda real en Lima: pedidos de almuerzo por piso, **cuentas diarias y semanales** de los comerciantes del edificio, cobros de la **mesa del salón**, abonos en **efectivo o Yape** y respaldo en Excel/JSON.
+Aplicación web para gestionar el día a día de una fuente de soda real en Lima: pedidos de almuerzo por piso, **cuentas diarias y semanales** de los comerciantes del edificio, abonos en **efectivo o Yape** y respaldo en Excel/JSON.
 
 Varias personas pueden usarla a la vez desde el celular o la computadora: **cada cambio se guarda en la nube y aparece al instante en todas las pantallas abiertas.**
 
@@ -10,11 +10,10 @@ Varias personas pueden usarla a la vez desde el celular o la computadora: **cada
 
 ## ✨ Funcionalidades
 
-- **Registro de pedidos** por cliente y piso (Calle, 1ro–4to), con menú completo o solo segundo y adicionales del catálogo.
+- **Registro de pedidos** por cliente y piso (Calle, 1ro–4to), con menú completo o solo segundo (tarifa Afuera o Tienda) y adicionales del catálogo.
 - **Cuentas diarias y semanales**: saldo por cobrar, abonos parciales, marcar como pagado (efectivo / Yape). Un pedido va siempre a la cuenta que tiene el cliente. En las semanales, cobrar un día, pedido o producto registra su abono, y los pedidos cubiertos por abonos se pintan de verde (`src/utils/weeklyLedger.ts`).
-- **Lonches**: tablero de la tarde con tres fases (anotado → preparado → listo) y la hora de cada paso; el pedido se suma a la cuenta del cliente y los listos se separan en cobrados / no cobrados.
+- **Lonches**: tablero de la tarde con tres fases (anotado → preparado → listo) y la hora de cada paso; el pedido se suma a la cuenta del cliente y los listos se separan en cobrados / no cobrados. Cada lonche nuevo o modificado muestra un aviso con sonido en todos los equipos ("Rosa ha pedido un lonche").
 - **Estado de cuenta por WhatsApp**: máximo 2 semanas detalladas (lunes a sábado), lo anterior resumido en "cuenta pasada".
-- **Mesa del salón**: contador de menús y extras del día, con cuadre efectivo vs. Yape.
 - **Directorio de clientes**: alta, edición, fusión de duplicados y eliminación.
 - **Catálogo de adicionales** editable (bebidas, panes, dulces…), con filtro por tipo y opción para combinar duplicados sin alterar montos ya cobrados.
 - **Respaldo**: descarga ZIP (Excel/CSV + JSON) y restauración completa.

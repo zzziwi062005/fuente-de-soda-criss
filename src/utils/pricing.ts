@@ -12,7 +12,7 @@ export function generateWhatsAppMessage(order: Order): string {
   const date = new Date(order.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   let text = `*FUENTE DE SODA CRISS* 🍽️\n`;
   text += `*Comanda N° #${order.orderNumber}* (${date})\n`;
-  text += `📍 *Destino:* ${order.customerOrLocation} (${order.clientType === 'mesa' ? 'Mesa / Local' : 'Tienda / Delivery'})\n`;
+  text += `📍 *Destino:* ${order.customerOrLocation} (${order.clientType === 'mesa' ? 'Afuera' : 'Tienda'})\n`;
   text += `--------------------------------\n`;
 
   order.lunches.forEach((lunch, idx) => {

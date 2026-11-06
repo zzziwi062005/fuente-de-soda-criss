@@ -208,7 +208,7 @@ export default function App() {
             <strong className="text-stone-200">"Fuente de Soda Criss"</strong> — Sistema de Registro de Ventas y Cobros.
           </div>
           <div className="flex items-center gap-3 text-stone-400">
-            <span>Mesa: Menú S/ 13 • Segundo S/ 12</span>
+            <span>Afuera: Menú S/ 13 • Segundo S/ 12</span>
             <span>•</span>
             <span>Tienda: Menú S/ 12 • Segundo S/ 11</span>
           </div>

@@ -466,10 +466,7 @@ export const ClientsDirectoryModal: React.FC<ClientsDirectoryModalProps> = ({
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
-                          onClick={() => {
-                            onClose();
-                            onEditClient(client);
-                          }}
+                          onClick={() => onEditClient(client)}
                           className="px-2.5 py-1.5 bg-stone-100 hover:bg-amber-100 text-stone-700 hover:text-amber-950 font-bold text-xs rounded-xl border border-stone-200 flex items-center gap-1 transition-colors"
                           title="Editar piso, nombre, tienda o celular"
                         >
