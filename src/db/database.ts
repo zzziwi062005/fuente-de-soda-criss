@@ -355,6 +355,31 @@ const PAGE_SIZE = 1000; // límite por defecto de filas por consulta en Supabase
 const CHUNK_SIZE = 500;
 const RETRY_MS = 5000;
 
+/**
+ * Máximo de filas que un guardado normal puede borrar sin avisarlo antes.
+ * Borrar un pedido, un día o un producto quita pocas filas; si un guardado
+ * intenta borrar más, casi seguro la pantalla tenía la lista incompleta o vieja
+ * (eso borró ~4,500 pedidos el 21/11/2026) y se cancela entero.
+ */
+export const MAX_SILENT_DELETES = 30;
+
+export interface SaveOptions {
+  /** Cuántas filas se espera borrar a propósito (p. ej. al eliminar un cliente con su historial). */
+  expectedDeletes?: number;
+}
+
+class MassDeleteBlockedError extends Error {
+  constructor(readonly table: string, readonly count: number) {
+    super(`Guardado cancelado: iba a borrar ${count} filas de ${table}`);
+  }
+}
+
+class NotLoadedError extends Error {
+  constructor(readonly table: string) {
+    super(`Guardado cancelado: ${table} todavía no termina de cargar`);
+  }
+}
+
 const chunk = <T>(arr: T[], size: number): T[][] => {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -431,6 +456,10 @@ class DatabaseService {
     await state.loading;
   }
 
+  /**
+   * Carga una tabla completa. Si falla, LANZA el error: devolver una lista vacía
+   * haría creer a la pantalla que no hay datos.
+   */
   private async getCollection<T>(key: CollectionKey): Promise<T[]> {
     try {
       await this.ensureLoaded(key);
@@ -440,8 +469,7 @@ class DatabaseService {
       return items;
     } catch (e) {
       console.error(`[db] Error cargando ${key}`, e);
-      this.notifyError('No se pudieron cargar los datos de la nube. Revisa tu conexión.');
-      return [];
+      throw e;
     }
   }
 
@@ -513,11 +541,12 @@ class DatabaseService {
     return rows;
   }
 
-  private async applySave(key: CollectionKey, items: unknown[]): Promise<void> {
-    await this.ensureLoaded(key);
+  private async applySave(key: CollectionKey, items: unknown[], opts?: SaveOptions): Promise<void> {
+    const state = this.tables[key];
+    // La pantalla todavía no terminó de cargar esta tabla: no hay base segura para comparar.
+    if (!state.loaded) throw new NotLoadedError(state.def.table);
     if (key === 'consumptions' || key === 'payments') await this.ensureLoaded('clients');
 
-    const state = this.tables[key];
     const table = state.def.table;
     const rows = this.buildRows(key, items);
     const newIds = new Set(rows.map((r) => String(r.id)));
@@ -536,6 +565,11 @@ class DatabaseService {
     // Solo borra lo que esta pantalla tenía y el usuario quitó
     const removed = [...state.ui.keys()].filter((id) => !newIds.has(id) && state.server.has(id));
 
+    // Freno de seguridad: un guardado que borra muchas filas sin haberlo anunciado
+    // se cancela COMPLETO (no se borra ni se sube nada).
+    const allowedDeletes = Math.max(MAX_SILENT_DELETES, opts?.expectedDeletes ?? 0);
+    if (removed.length > allowedDeletes) throw new MassDeleteBlockedError(table, removed.length);
+
     for (const part of chunk(removed, CHUNK_SIZE)) {
       const { error } = await supabase.from(table).delete().in('id', part);
       if (error) throw error;
@@ -551,7 +585,7 @@ class DatabaseService {
     state.ui = canon;
   }
 
-  private save(key: CollectionKey, items: unknown[]): Promise<void> {
+  private save(key: CollectionKey, items: unknown[], opts?: SaveOptions): Promise<void> {
     this.latestDesired.set(key, items);
     const timer = this.retryTimers.get(key);
     if (timer) {
@@ -559,7 +593,20 @@ class DatabaseService {
       this.retryTimers.delete(key);
     }
 
-    return this.enqueue(() => this.applySave(key, items)).catch((e) => {
+    return this.enqueue(() => this.applySave(key, items, opts)).catch((e) => {
+      if (e instanceof MassDeleteBlockedError || e instanceof NotLoadedError) {
+        // No se reintenta: la pantalla tenía datos incompletos o viejos.
+        // Se vuelve a traer todo de la nube para que la pantalla quede al día.
+        console.error(`[db] ${e.message}`);
+        this.latestDesired.delete(key);
+        this.notifyError(
+          e instanceof MassDeleteBlockedError
+            ? `Por seguridad no se guardó el último cambio: iba a borrar ${e.count} registros. La pantalla se actualizó; vuelve a hacerlo.`
+            : 'Los datos todavía están cargando. Espera un momento y vuelve a intentarlo.'
+        );
+        void this.refreshFromServer(key);
+        return;
+      }
       console.error(`[db] Error guardando ${key}`, e);
       this.notifyError('No se pudo guardar en la nube. Se reintentará automáticamente…');
       // Reintenta con la última versión que pidió la pantalla
@@ -573,16 +620,29 @@ class DatabaseService {
     });
   }
 
-  async saveClients(clients: ClientRecord[]): Promise<void> {
-    return this.save('clients', clients);
+  async saveClients(clients: ClientRecord[], opts?: SaveOptions): Promise<void> {
+    return this.save('clients', clients, opts);
   }
 
-  async saveConsumptions(consumptions: ConsumptionRecord[]): Promise<void> {
-    return this.save('consumptions', consumptions);
+  async saveConsumptions(consumptions: ConsumptionRecord[], opts?: SaveOptions): Promise<void> {
+    return this.save('consumptions', consumptions, opts);
   }
 
-  async savePayments(payments: PaymentRecord[]): Promise<void> {
-    return this.save('payments', payments);
+  async savePayments(payments: PaymentRecord[], opts?: SaveOptions): Promise<void> {
+    return this.save('payments', payments, opts);
+  }
+
+  /** Vuelve a traer una tabla de la nube y se la manda a la pantalla (tras un guardado cancelado). */
+  private async refreshFromServer(key: CollectionKey) {
+    const gen = this.generation;
+    try {
+      const rows = await this.fetchAll(key);
+      if (gen !== this.generation) return;
+      this.replaceServerState(key, rows);
+    } catch (e) {
+      console.warn('[db] No se pudo refrescar', key, e);
+    }
+    this.markDirty(key);
   }
 
   async saveMesaRecords(records: MesaCounterRecord[]): Promise<void> {

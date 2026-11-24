@@ -8,11 +8,13 @@ import {
   normalizePiso
 } from './types';
 import { INITIAL_EXTRAS } from './data/initialData';
-import { 
-  dbService, 
-  INITIAL_CLIENTS, 
-  getTodayDateString 
+import {
+  dbService,
+  INITIAL_CLIENTS,
+  getTodayDateString,
+  SaveOptions
 } from './db/database';
+import { parseBackup } from './db/backupParser';
 import { Navbar } from './components/Navbar';
 import { CuadernoLedger } from './components/CuadernoLedger';
 import { downloadZipBackup, FullBackupPayload } from './utils/backupExport';
@@ -54,32 +56,43 @@ export default function App() {
     });
   }, []);
 
-  // Load from dbService on mount
+  // Carga inicial. La pantalla de trabajo NO se muestra hasta tener TODAS las tablas:
+  // anotar con la lista a medio cargar fue lo que borró los pedidos el 21/11/2026.
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+
   useEffect(() => {
+    let cancelled = false;
     async function loadDb() {
+      setLoadState('loading');
       try {
-        const loadedClients = await dbService.getClients();
+        const [loadedClients, loadedConsumptions, loadedPayments, loadedMesaRecords, loadedExtras] =
+          await Promise.all([
+            dbService.getClients(),
+            dbService.getConsumptions(),
+            dbService.getPayments(),
+            dbService.getMesaRecords(),
+            dbService.getExtras(),
+          ]);
+        if (cancelled) return;
         setClients(loadedClients.map(c => ({ ...c, piso: normalizePiso(c.piso) })));
-
-        const loadedConsumptions = await dbService.getConsumptions();
         setConsumptions(loadedConsumptions.map(c => ({ ...c, piso: normalizePiso(c.piso) })));
-
-        const loadedPayments = await dbService.getPayments();
         setPayments(loadedPayments.map(p => ({ ...p, piso: normalizePiso(p.piso) })));
-
-        const loadedMesaRecords = await dbService.getMesaRecords();
         setMesaRecords(loadedMesaRecords);
-
-        const loadedExtras = await dbService.getExtras();
         if (loadedExtras && loadedExtras.length > 0) {
           setExtras(loadedExtras);
         }
+        setLoadState('ready');
       } catch (e) {
         console.error('Error loading data from dbService', e);
+        if (!cancelled) setLoadState('error');
       }
     }
     loadDb();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAttempt]);
 
   // Save extras changes to localStorage and DB
   useEffect(() => {
@@ -97,14 +110,16 @@ export default function App() {
   };
 
   // Database operation handlers
-  const handleSaveConsumptions = async (data: ConsumptionRecord[]) => {
+  const handleSaveConsumptions = async (data: ConsumptionRecord[], opts?: SaveOptions) => {
+    if (loadState !== 'ready') return;
     setConsumptions(data);
-    await dbService.saveConsumptions(data);
+    await dbService.saveConsumptions(data, opts);
   };
 
-  const handleSavePayments = async (data: PaymentRecord[]) => {
+  const handleSavePayments = async (data: PaymentRecord[], opts?: SaveOptions) => {
+    if (loadState !== 'ready') return;
     setPayments(data);
-    await dbService.savePayments(data);
+    await dbService.savePayments(data, opts);
   };
 
   const handleSaveMesaRecords = async (data: MesaCounterRecord[]) => {
@@ -118,9 +133,10 @@ export default function App() {
     showToast('Catálogo de adicionales actualizado');
   };
 
-  const handleSaveClients = async (data: ClientRecord[]) => {
+  const handleSaveClients = async (data: ClientRecord[], opts?: SaveOptions) => {
+    if (loadState !== 'ready') return;
     setClients(data);
-    await dbService.saveClients(data);
+    await dbService.saveClients(data, opts);
   };
 
   // Export full ZIP backup containing both JSON and Excel (CSV)
@@ -145,6 +161,38 @@ export default function App() {
   };
 
   const handleImportBackup = async (jsonStr: string) => {
+    // Restaurar REEMPLAZA todo lo que hay en la nube: se pide confirmación mostrando
+    // de cuándo es el respaldo y cuántos pedidos tiene frente a los que hay ahora.
+    let preview: ReturnType<typeof parseBackup> = null;
+    let exportDate = '';
+    try {
+      preview = parseBackup(jsonStr, extras);
+      const raw = JSON.parse(jsonStr);
+      if (raw && typeof raw.exportDate === 'string') exportDate = raw.exportDate;
+    } catch {
+      preview = null;
+    }
+    if (!preview) {
+      showToast('El archivo no contiene un formato de JSON válido');
+      return;
+    }
+    const fecha = exportDate
+      ? new Date(exportDate).toLocaleString('es-PE', { dateStyle: 'full', timeStyle: 'short' })
+      : 'fecha desconocida';
+    const ok = window.confirm(
+      `⚠️ RESTAURAR BORRA TODO LO QUE HAY AHORA y lo reemplaza por el respaldo.\n\n` +
+        `Respaldo del: ${fecha}\n` +
+        `Pedidos en el respaldo: ${preview.consumptions.length} (ahora hay ${consumptions.length})\n` +
+        `Abonos en el respaldo: ${preview.payments.length} (ahora hay ${payments.length})\n` +
+        `Clientes en el respaldo: ${preview.clients.length} (ahora hay ${clients.length})\n\n` +
+        `Todo lo anotado después de esa fecha se perderá. ¿Seguro que quieres restaurar?`
+    );
+    if (!ok) return;
+    const typed = window.prompt('Para confirmar, escribe RESTAURAR en mayúsculas:');
+    if ((typed || '').trim() !== 'RESTAURAR') {
+      showToast('Restauración cancelada');
+      return;
+    }
     try {
       const restored = await dbService.importFullBackup(jsonStr);
       if (restored) {
@@ -184,6 +232,31 @@ export default function App() {
 
       {/* Main Single-screen Viewport: Registro de Ventas */}
       <main className="flex-1 pb-12">
+        {loadState !== 'ready' ? (
+          <div className="max-w-md mx-auto mt-16 px-4 text-center">
+            {loadState === 'loading' ? (
+              <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-xs">
+                <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-200 border-t-amber-700 animate-spin" />
+                <p className="font-bold text-stone-800">Cargando pedidos, abonos y clientes…</p>
+                <p className="text-xs text-stone-500 mt-1">
+                  Espera a que termine antes de anotar. Con señal lenta puede tardar unos segundos.
+                </p>
+              </div>
+            ) : (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 shadow-xs">
+                <p className="font-bold text-rose-800">No se pudieron cargar los datos de la nube.</p>
+                <p className="text-xs text-rose-700 mt-1">Revisa tu conexión a internet y vuelve a intentarlo.</p>
+                <button
+                  type="button"
+                  onClick={() => setLoadAttempt((n) => n + 1)}
+                  className="mt-4 bg-amber-800 hover:bg-amber-900 text-white font-bold text-sm px-4 py-2.5 rounded-xl"
+                >
+                  Reintentar
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
         <CuadernoLedger
           clients={clients}
           consumptions={consumptions}
@@ -199,6 +272,7 @@ export default function App() {
           onExportBackup={handleExportZipBackup}
           onImportBackup={handleImportBackup}
         />
+        )}
       </main>
 
       {/* Clean Footer */}

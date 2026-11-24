@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { 
   ClientRecord, 
   ConsumptionRecord, 
@@ -28,7 +28,7 @@ import {
   linkedConsumptionId,
   linkedPaymentId,
 } from '../utils/weeklyLedger';
-import { getDayOfWeekName, getTodayDateString } from '../db/database';
+import { getDayOfWeekName, getTodayDateString, SaveOptions } from '../db/database';
 import { formatPhoneForWhatsApp, formatPhoneDisplay } from '../utils/phone';
 import { ClientsDirectoryModal } from './ClientsDirectoryModal';
 import { MergeConsumptionsModal } from './MergeConsumptionsModal';
@@ -121,11 +121,11 @@ interface CuadernoLedgerProps {
   extrasCatalog: ExtraItem[];
   entradas?: string[];
   segundos?: string[];
-  onSaveConsumptions: (data: ConsumptionRecord[]) => void;
-  onSavePayments: (data: PaymentRecord[]) => void;
+  onSaveConsumptions: (data: ConsumptionRecord[], opts?: SaveOptions) => void;
+  onSavePayments: (data: PaymentRecord[], opts?: SaveOptions) => void;
   onSaveMesaRecords: (data: MesaCounterRecord[]) => void;
   onSaveExtras?: (data: ExtraItem[]) => void;
-  onSaveClients: (data: ClientRecord[]) => void;
+  onSaveClients: (data: ClientRecord[], opts?: SaveOptions) => void;
   openNewClientSignal?: number;
   onExportBackup: () => void;
   onImportBackup: (jsonStr: string) => void;
@@ -218,6 +218,14 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     return rawConsumptions.map((c) => (isMisfiled(c) ? { ...c, accountType: 'semanal' as const } : c));
   }, [rawConsumptions, clients]);
 
+  // Las ventanas de confirmación se abren en un momento y se confirman en otro (a veces
+  // minutos después, mientras otros equipos siguen anotando). Lo que se guarda al confirmar
+  // debe calcularse con los datos de ESE momento: si no, se borraban o revertían pedidos
+  // anotados mientras la ventana estaba abierta.
+  const latestRef = useRef({ consumptions, payments, clients, mesaRecords });
+  latestRef.current = { consumptions, payments, clients, mesaRecords };
+  const handleMergeExtrasRef = useRef<(mainId: string, secondaryIds: string[]) => void>(() => {});
+
   // Navigation within the sales register (Registro de Ventas) - Persistente
   const [activeTab, setActiveTab] = useState<CuadernoTab>(() => {
     const saved = localStorage.getItem('criss_active_tab');
@@ -241,10 +249,9 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     return saved !== null ? Number(saved) || 0 : 0;
   });
 
-  // Selected date for Daily Cash / Mesa calculations - Persistente
-  const [selectedDate, setSelectedDate] = useState<string>(() => {
-    return localStorage.getItem('criss_selected_date') || today;
-  });
+  // Fecha seleccionada para Cuentas Diarias y Caja: al abrir la app SIEMPRE es el día de hoy
+  // (antes se recordaba el último día visto y se podía anotar en un día equivocado).
+  const [selectedDate, setSelectedDate] = useState<string>(today);
 
   // Mes actual (YYYY-MM) para las métricas del banner
   const currentYearMonth = today.substring(0, 7);
@@ -504,10 +511,6 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
   React.useEffect(() => {
     localStorage.setItem('criss_selected_piso', selectedPiso);
   }, [selectedPiso]);
-
-  React.useEffect(() => {
-    localStorage.setItem('criss_selected_date', selectedDate);
-  }, [selectedDate]);
 
   React.useEffect(() => {
     localStorage.setItem('criss_week_offset', String(weekOffset));
@@ -1829,6 +1832,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         onSaveConsumptions(consumptions.filter((c) => c.id !== id));
         // Si el pedido semanal tenía su propio pago, ese abono también se quita
         if (payments.some((p) => linkedConsumptionId(p.id) === id)) {
@@ -1852,6 +1856,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         onSaveConsumptions(
           consumptions.filter((c) => !(c.clientId === clientId && c.date === dateStr))
         );
@@ -1933,6 +1938,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         onSavePayments(payments.filter((p) => p.id !== id));
         // Si era el pago de un pedido semanal, ese pedido vuelve a pendiente
         const consId = linkedConsumptionId(id);
@@ -2072,9 +2078,14 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
+        // Eliminar un cliente quita a propósito todo su historial: se anuncia cuántos registros
+        // se borran para que el freno de seguridad de borrados masivos lo permita.
+        const nextConsumptions = consumptions.filter((c) => c.clientId !== clientId);
+        const nextPayments = payments.filter((p) => p.clientId !== clientId);
         onSaveClients(clients.filter((c) => c.id !== clientId));
-        onSaveConsumptions(consumptions.filter((c) => c.clientId !== clientId));
-        onSavePayments(payments.filter((p) => p.clientId !== clientId));
+        onSaveConsumptions(nextConsumptions, { expectedDeletes: consumptions.length - nextConsumptions.length });
+        onSavePayments(nextPayments, { expectedDeletes: payments.length - nextPayments.length });
       },
     });
   };
@@ -2895,6 +2906,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         let updated = consumptions.map((c) => {
           if (c.id === item.consumptionId) {
             const nextLunches = c.lunches.filter((l) => l.id !== item.id);
@@ -3080,6 +3092,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       confirmLabel: 'Sí, revertir a Diaria',
       cancelLabel: 'Cancelar',
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         const updatedClients = clients.map((c) =>
           c.id === client.id ? { ...c, accountType: 'diaria' as const } : c
         );
@@ -3254,6 +3267,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       cancelLabel: 'Cancelar',
       isDestructive: true,
       onConfirm: () => {
+        const { consumptions, payments, clients, mesaRecords } = latestRef.current;
         const filtered = mesaRecords.filter((r) => r.date !== selectedDate);
         onSaveMesaRecords(filtered);
         setMesaDraft({
@@ -3386,6 +3400,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
     setExtrasMergeSelection([]);
     setIsExtrasMergeMode(false);
   };
+  handleMergeExtrasRef.current = handleMergeExtras;
 
   const handleAskMergeExtras = () => {
     const [mainId, ...secondaryIds] = extrasMergeSelection;
@@ -3404,7 +3419,7 @@ export const CuadernoLedger: React.FC<CuadernoLedgerProps> = ({
       detail: `Se actualizarán ${uses} pedido(s) que los usan. Los precios y totales no cambian: lo ya cobrado queda igual.`,
       confirmLabel: 'Sí, combinar',
       cancelLabel: 'Cancelar',
-      onConfirm: () => handleMergeExtras(mainId, secondaryIds),
+      onConfirm: () => handleMergeExtrasRef.current(mainId, secondaryIds),
     });
   };
 

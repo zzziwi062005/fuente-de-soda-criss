@@ -72,3 +72,17 @@ src/components/AuthGate.tsx  login + useAuth()
 supabase/schema.sql       esquema completo (idempotente)
 ```
 
+
+## Protección contra borrados accidentales (desde el 24/11/2026)
+
+El 21/11/2026 un celular anotó un pedido cuando la app todavía estaba cargando, y el guardado
+borró ~4,500 pedidos. Desde entonces:
+
+- La app no muestra la pantalla de trabajo hasta haber cargado **todas** las tablas.
+- Un guardado que intente borrar más de 30 filas sin anunciarlo se **cancela completo**
+  (`MAX_SILENT_DELETES` en `src/db/database.ts`). Eliminar un cliente anuncia cuántas filas borra.
+- Las ventanas de confirmación usan los datos del momento en que se confirma, no los de cuando se abrieron.
+- **Restaurar** pide confirmación mostrando la fecha del respaldo y cuántos registros tiene, y hay que escribir `RESTAURAR`.
+- La app abre siempre en el día de hoy.
+- `supabase/papelera.sql` crea `public.row_history`: copia de cada pedido, abono o cliente borrado
+  o modificado (90 días). Al final del archivo hay ejemplos para recuperar.
